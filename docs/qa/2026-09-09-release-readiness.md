@@ -1,9 +1,10 @@
 # 0.8.0 final release review
 
-This review found and fixed a release blocker in the Meetings auto-run controls.
-Final CI and signed-artifact receipts are subsequent gates; the initial bundle
-below predates the fix and must not be distributed. No public release, appcast,
-Homebrew update, or download upload is authorized by this review.
+The reviewed fixes are merged in [PR #992](https://github.com/moona3k/macparakeet/pull/992)
+and final CI passed. The app is signed, notarized, stapled, and Gatekeeper accepted.
+**Distribution remains blocked on the DMG notarization submission**, still
+`In Progress` after the bounded 30-minute check and a final check at 09:52 UTC.
+No public release, appcast, Homebrew update, or download was published.
 
 ## Scope and source
 
@@ -57,12 +58,63 @@ preferences were rewritten during this review.
 
 Local detailed review and command logs are under `/tmp/macparakeet-release-*` on
 the review host. They are supporting local evidence, not durable public assets.
-Final artifact identity, final CI, signing/notarization, signed-helper startup,
-and repeat transcription/export must be recorded for the corrected candidate.
+The final candidate receipts below supersede the intermediate build checks.
+DMG acceptance and stapling remain outstanding.
 
 The installed no-mistakes daemon selects Claude and cannot select Grok per run.
 Independent Cursor/Grok reviews and the normal GitHub gates honor the requested
 model. Local Greptile requires authentication; its absence is not a review pass.
+
+## Final candidate and receipts
+
+- Reviewed/package source: `01751ce94a6c8655c1ad7056ac925c15d5685c4b`.
+- Merged on remote main: `c93c837c2ed23a8cb6b1478dbfe20f4c00fb6d37`.
+  Both have tree `2951a541a831fd76b53debb29a0c3155564b238d`.
+- [Final CI 34332971965](https://github.com/moona3k/macparakeet/actions/runs/34332971965)
+  passed: Release build, CLI contract smoke, packaged-app smoke, concurrency,
+  Swift 6, and full tests (5,900 XCTest entries and 29 Swift Testing tests).
+  No full local suite was run; focused tests preceded CI.
+- CodeRabbit confirmed the availability-error fix and withdrew its proposed
+  asynchronous loading mechanism. Both threads are resolved. Independent Grok
+  correctness and maintainability reviews reached LGTM.
+- App **0.8.0**, build **20260909090814**, embedded CLI **4.0.0**. Normal Xcode
+  Release and SwiftPM CLI builds; no skipped-build metadata stamping.
+- App/dSYM UUID: `9BC5DB51-D9E0-306D-9CEC-ACEE8200A1B9`.
+- App archive SHA-256:
+  `ec2ed253a33b4977d60863ef078b3484074cfc7cf2517d4178f5872199fa7cc6`.
+- App notarization **Accepted**: `925ecc68-f09e-4791-9b74-5b64e13e52c5`.
+  Stapler validation, Gatekeeper, signatures, privacy surface, and required echo
+  assets passed. Signed yt-dlp 2026.08.19, Node v24.13.1, and FFmpeg 9.0.1 start.
+- Final signed CLI passed local generated-audio transcription and Markdown export
+  against an isolated SQLite database. No live provider inference was exercised.
+- DMG SHA-256 before any staple:
+  `2b4c16b5af9c544b5e5f3c5a52645d180cec0c28981824ca10713be100fd4b1f`.
+- DMG submission: `87db18e5-31ce-4854-8f99-5407540ad391`, registered
+  **2026-09-09 09:20:03 UTC**, status **In Progress**. The submit process exited 1;
+  its output was lost inside the script's command substitution. The reason is
+  unproven. The exact DMG is preserved, and was not resubmitted or stapled.
+- Read-only mounted DMG checks passed: app/CLI/Info.plist hashes match the prepared
+  app; embedded app signature, staple and Gatekeeper checks pass; embedded CLI
+  reports 4.0.0. The verification mount was detached.
+
+The app upload used `notarytool submit --no-s3-acceleration --no-progress` and
+completed successfully. The same flags did not establish a successful DMG upload.
+An ID proves registration, not completed upload: Apple's
+[notarization API](https://developer.apple.com/documentation/notaryapi/submitting-software-for-notarization-over-the-web)
+registers the submission before the S3 transfer. `info`/`history` do not expose a
+separate upload-complete state. The [status feed](https://developer.apple.com/system-status/)
+listed no Notary Service incident; this does not explain this submission.
+
+Resume by checking the **same DMG ID**. After it is Accepted, staple that DMG,
+validate the staple and Gatekeeper assessment, and record its final hash. If
+Invalid/Rejected, retrieve its notarization log before changing or resubmitting
+anything. Do not rerun the full signing script merely because processing is slow.
+The host's `dist/release-candidate.json` records artifact identities and pending
+status; supporting receipts are `/tmp/macparakeet-release-final-*`.
+
+The older development app still has an **Edit Prompt** sheet open. It was not
+force-quit or replaced, and no editor contents were discarded. A normal local
+restart remains pending closure of that sheet.
 
 ## Release scope and remaining coverage
 
