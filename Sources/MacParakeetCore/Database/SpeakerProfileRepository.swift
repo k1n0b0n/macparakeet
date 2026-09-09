@@ -42,12 +42,19 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
         }
     }
 
-    /// Case-insensitive, matching the unique index: "sarah" and "Sarah" are the
-    /// same person as far as enrollment is concerned.
+    /// Case-insensitive lookup: "sarah" and "Sarah" are the same person as far
+    /// as enrollment is concerned.
+    ///
+    /// Uses a localized collation rather than SQLite's `NOCASE`, which folds
+    /// only the 26 ASCII letters — under it "josé" and "JOSÉ" would be two
+    /// different people, and the second enrollment would silently create a
+    /// rival profile instead of adding a sample. The unique index keeps
+    /// `NOCASE` as a backstop, so this lookup is deliberately the wider of the
+    /// two.
     public func profile(named name: String) throws -> SpeakerProfile? {
         try dbQueue.read { db in
             try SpeakerProfile
-                .filter(Column("displayName").collating(.nocase) == name)
+                .filter(Column("displayName").collating(.localizedCaseInsensitiveCompare) == name)
                 .fetchOne(db)
         }
     }
@@ -101,8 +108,24 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
         }
     }
 
+    /// Upserts a decision, keeping the original `createdAt`.
+    ///
+    /// A link is saved again whenever its status moves — suggested, then
+    /// confirmed or dismissed — and each caller builds a fresh value. Without
+    /// this, the moment the suggestion was first made would be overwritten by
+    /// the moment the user answered, and the journal would lose the interval
+    /// between them.
     public func save(_ link: SpeakerProfileLink) throws {
         try dbQueue.write { db in
+            var link = link
+            let existing = try SpeakerProfileLink
+                .filter(Column("transcriptionId") == link.transcriptionId)
+                .filter(Column("speakerId") == link.speakerId)
+                .filter(Column("transcriptFingerprint") == link.transcriptFingerprint)
+                .fetchOne(db)
+            if let existing {
+                link.createdAt = existing.createdAt
+            }
             try link.save(db)
         }
     }

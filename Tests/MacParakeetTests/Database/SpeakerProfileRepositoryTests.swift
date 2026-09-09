@@ -278,6 +278,37 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         )
     }
 
+    func testProfileLookupHandlesNonAsciiCase() throws {
+        // SQLite's NOCASE folds only ASCII, so this is the case that would
+        // silently create a second profile for the same person.
+        let profile = SpeakerProfile(displayName: "José", identity: identity)
+        try repo.save(profile)
+        XCTAssertEqual(try repo.profile(named: "josé")?.id, profile.id)
+        XCTAssertEqual(try repo.profile(named: "JOSÉ")?.id, profile.id)
+    }
+
+    func testUpdatingALinkKeepsItsOriginalCreationTime() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let transcription = try savedTranscription()
+        let suggestedAt = Date(timeIntervalSince1970: 1_000_000)
+
+        var suggestion = link(transcriptionId: transcription.id, profileId: profile.id)
+        suggestion.createdAt = suggestedAt
+        suggestion.updatedAt = suggestedAt
+        try repo.save(suggestion)
+
+        var confirmation = link(transcriptionId: transcription.id, profileId: profile.id)
+        confirmation.status = .confirmed
+        try repo.save(confirmation)
+
+        let stored = try XCTUnwrap(
+            try repo.links(transcriptionId: transcription.id, fingerprint: "fingerprint").first
+        )
+        XCTAssertEqual(stored.status, .confirmed)
+        XCTAssertEqual(stored.createdAt.timeIntervalSince1970, suggestedAt.timeIntervalSince1970, accuracy: 0.001)
+        XCTAssertGreaterThan(stored.updatedAt, suggestedAt)
+    }
+
     func testSavingALinkTwiceUpdatesItInPlace() throws {
         let profile = try enrolledProfile(named: "Sarah")
         let transcription = try savedTranscription()
