@@ -515,6 +515,14 @@ public final class UserDefaultsAppRuntimePreferences: AppRuntimePreferencesProto
     public static let defaultSpeakerDiarizationEnabled = true
     public static let meetingSpeakerDiarizationKey = "meetingSpeakerDiarization"
     public static let defaultMeetingSpeakerDiarizationEnabled = true
+    /// Persistent voice profiles. Off unless the user asks: a voiceprint is
+    /// biometric data, so it takes an explicit act, never a default.
+    public static let rememberSpeakersKey = "rememberSpeakers"
+    public static let defaultRememberSpeakersEnabled = false
+    /// When the user acknowledged that they have the participants' permission.
+    /// A date rather than a flag, because that is what the question "when did
+    /// you consent?" needs answering with.
+    public static let voiceprintConsentAcknowledgedAtKey = "voiceprintConsentAcknowledgedAt"
     public static let aiFormatterEnabledKey = "aiFormatterEnabled"
     public static let aiFormatterEnabledForDictationKey = "aiFormatterEnabledForDictation"
     public static let aiFormatterEnabledForTranscriptionsKey = "aiFormatterEnabledForTranscriptions"
@@ -579,6 +587,18 @@ public final class UserDefaultsAppRuntimePreferences: AppRuntimePreferencesProto
 
     public static func meetingSpeakerDiarizationEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: meetingSpeakerDiarizationKey) as? Bool ?? defaultMeetingSpeakerDiarizationEnabled
+    }
+
+    /// Voice profiles need speaker detection to have produced clusters in the
+    /// first place, so the two are checked together rather than separately.
+    public static func rememberSpeakersEnabled(defaults: UserDefaults = .standard) -> Bool {
+        let enabled = defaults.object(forKey: rememberSpeakersKey) as? Bool
+            ?? defaultRememberSpeakersEnabled
+        return enabled && meetingSpeakerDiarizationEnabled(defaults: defaults)
+    }
+
+    public static func voiceprintConsentAcknowledgedAt(defaults: UserDefaults = .standard) -> Date? {
+        defaults.object(forKey: voiceprintConsentAcknowledgedAtKey) as? Date
     }
 
     public static func showMeetingRecordingPill(defaults: UserDefaults = .standard) -> Bool {

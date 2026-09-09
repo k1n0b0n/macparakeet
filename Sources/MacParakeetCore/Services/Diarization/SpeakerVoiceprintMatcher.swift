@@ -102,7 +102,8 @@ public struct SpeakerVoiceprintSuggestion: Sendable, Equatable {
     public let profileId: UUID
     public let displayName: String
     public let distance: Double
-    /// What the decision had to beat; `nil` when there was no second candidate.
+    /// Next-best distance on either side, whichever is closer — what the
+    /// decision had to beat. `nil` when there was no second candidate at all.
     public let runnerUpDistance: Double?
 
     public init(
@@ -120,6 +121,44 @@ public struct SpeakerVoiceprintSuggestion: Sendable, Equatable {
     }
 }
 
+/// Why a detected speaker did or did not get a name.
+public enum SpeakerMatchOutcome: String, Sendable, Codable {
+    case suggested
+    /// Too little speech to score at all.
+    case belowSpeechGate
+    /// No enrolled profile shared this embedding model.
+    case noComparableProfile
+    /// The closest profile was past the threshold.
+    case pastThreshold
+    /// Cleared the threshold but not the two-sided margin.
+    case marginTooSmall
+    /// Another cluster was a better fit for the same profile.
+    case notMutualBestMatch
+}
+
+/// What the matcher concluded about one detected speaker. Rejections carry
+/// their reason and distances, which is what calibration reads.
+public struct SpeakerMatchDecision: Sendable, Equatable {
+    public let speakerId: String
+    public let speechSeconds: Double
+    public let outcome: SpeakerMatchOutcome
+    public let profileId: UUID?
+    public let displayName: String?
+    public let distance: Double?
+    public let runnerUpDistance: Double?
+
+    public var suggestion: SpeakerVoiceprintSuggestion? {
+        guard outcome == .suggested, let profileId, let displayName, let distance else { return nil }
+        return SpeakerVoiceprintSuggestion(
+            speakerId: speakerId,
+            profileId: profileId,
+            displayName: displayName,
+            distance: distance,
+            runnerUpDistance: runnerUpDistance
+        )
+    }
+}
+
 /// Decides which enrolled voices to propose for one recording's speakers.
 ///
 /// Stateless and I/O-free on purpose: this is where the feature can be wrong
@@ -133,20 +172,32 @@ public struct SpeakerVoiceprintSuggestion: Sendable, Equatable {
 public enum SpeakerVoiceprintMatcher {
 
     /// Suggestions for `clusters`, at most one per cluster and one per profile.
-    ///
-    /// A pair is accepted only when it is each other's best match, clears the
-    /// threshold, and beats its runner-up by `margin` **on both sides**. The
-    /// two-sided rule is not belt and braces: the diarizer over-splits, so one
-    /// person routinely yields two clusters, and a cluster-side margin alone
-    /// would let both of them claim the same profile and put two "Sarah"s in
-    /// one transcript.
     public static func match(
         clusters: [SpeakerClusterObservation],
         profiles: [SpeakerProfileCandidate],
         policy: SpeakerMatchPolicy
     ) -> [SpeakerVoiceprintSuggestion] {
+        decisions(clusters: clusters, profiles: profiles, policy: policy).compactMap(\.suggestion)
+    }
+
+    /// One decision per cluster, accepted or not.
+    ///
+    /// A pair is accepted only when it is each other's best match, clears tau,
+    /// and beats its runner-up by `margin` on both sides. The second side is
+    /// load-bearing: the diarizer over-splits, so one person often yields two
+    /// clusters that would both claim the same profile.
+    public static func decisions(
+        clusters: [SpeakerClusterObservation],
+        profiles: [SpeakerProfileCandidate],
+        policy: SpeakerMatchPolicy
+    ) -> [SpeakerMatchDecision] {
         let scorable = clusters.filter { $0.speechSeconds >= policy.minSpeechSecondsToMatch }
-        guard !scorable.isEmpty, !profiles.isEmpty else { return [] }
+        let gated = clusters.filter { $0.speechSeconds < policy.minSpeechSecondsToMatch }
+            .map { rejection($0, .belowSpeechGate) }
+
+        guard !scorable.isEmpty, !profiles.isEmpty else {
+            return gated + scorable.map { rejection($0, .noComparableProfile) }
+        }
 
         // matches[clusterIndex][profileIndex], nil when incomparable.
         let matches: [[ReferenceMatch?]] = scorable.map { cluster in
@@ -154,22 +205,40 @@ public enum SpeakerVoiceprintMatcher {
         }
         let distances: [[Double?]] = matches.map { $0.map(\.?.distance) }
 
-        var suggestions: [SpeakerVoiceprintSuggestion] = []
+        var decisions = gated
         for (clusterIndex, cluster) in scorable.enumerated() {
-            let row = distances[clusterIndex]
-            guard let best = bestCandidate(in: row) else { continue }
-
-            let column = distances.map { $0[best.index] }
-            guard let bestForProfile = bestCandidate(in: column), bestForProfile.index == clusterIndex else {
-                // Some other cluster is a better fit for this profile, so this
-                // pairing is not mutual and nothing is proposed.
+            guard let best = bestCandidate(in: distances[clusterIndex]) else {
+                decisions.append(rejection(cluster, .noComparableProfile))
                 continue
             }
 
             let profile = profiles[best.index]
-            guard let winning = matches[clusterIndex][best.index],
-                  best.distance <= effectiveTau(for: winning, policy: policy)
-            else { continue }
+            guard let winning = matches[clusterIndex][best.index] else {
+                decisions.append(rejection(cluster, .noComparableProfile))
+                continue
+            }
+
+            // Threshold before mutuality so the journal stays truthful: a
+            // cluster whose closest profile is a stranger is unknown, not in
+            // conflict.
+            guard best.distance <= effectiveTau(for: winning, policy: policy) else {
+                decisions.append(
+                    rejection(cluster, .pastThreshold, profile: profile, distance: best.distance)
+                )
+                continue
+            }
+
+            let column = distances.map { $0[best.index] }
+            let bestForProfile = bestCandidate(in: column)
+
+            guard bestForProfile?.index == clusterIndex else {
+                // Some other cluster is a better fit for this profile, so the
+                // pairing is not mutual and nothing is proposed.
+                decisions.append(
+                    rejection(cluster, .notMutualBestMatch, profile: profile, distance: best.distance)
+                )
+                continue
+            }
 
             // A side with no second candidate has nothing to be separated
             // from, so its margin is vacuously satisfied. Failing it would make
@@ -177,24 +246,50 @@ public enum SpeakerVoiceprintMatcher {
             // Equality is checked before the configurable margin, which a
             // policy may set to zero: a tie would then pass
             // `runnerUp - best < 0` and position alone would decide.
-            if let runnerUp = best.runnerUp,
+            let runnerUp = [best.runnerUp, bestForProfile?.runnerUp].compactMap { $0 }.min()
+            if let runnerUp,
                runnerUp == best.distance || runnerUp - best.distance < policy.margin
-            { continue }
-            if let runnerUp = bestForProfile.runnerUp,
-               runnerUp == best.distance || runnerUp - best.distance < policy.margin
-            { continue }
+            {
+                decisions.append(
+                    rejection(
+                        cluster, .marginTooSmall, profile: profile,
+                        distance: best.distance, runnerUp: runnerUp
+                    )
+                )
+                continue
+            }
 
-            suggestions.append(
-                SpeakerVoiceprintSuggestion(
+            decisions.append(
+                SpeakerMatchDecision(
                     speakerId: cluster.speakerId,
+                    speechSeconds: cluster.speechSeconds,
+                    outcome: .suggested,
                     profileId: profile.profileId,
                     displayName: profile.displayName,
                     distance: best.distance,
-                    runnerUpDistance: [best.runnerUp, bestForProfile.runnerUp].compactMap { $0 }.min()
+                    runnerUpDistance: runnerUp
                 )
             )
         }
-        return suggestions
+        return decisions
+    }
+
+    private static func rejection(
+        _ cluster: SpeakerClusterObservation,
+        _ outcome: SpeakerMatchOutcome,
+        profile: SpeakerProfileCandidate? = nil,
+        distance: Double? = nil,
+        runnerUp: Double? = nil
+    ) -> SpeakerMatchDecision {
+        SpeakerMatchDecision(
+            speakerId: cluster.speakerId,
+            speechSeconds: cluster.speechSeconds,
+            outcome: outcome,
+            profileId: profile?.profileId,
+            displayName: profile?.displayName,
+            distance: distance,
+            runnerUpDistance: runnerUp
+        )
     }
 
     public struct ReferenceMatch: Sendable, Equatable {

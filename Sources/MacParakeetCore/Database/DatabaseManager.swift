@@ -2039,6 +2039,38 @@ public final class DatabaseManager: Sendable {
                 """)
         }
 
+        // v0.40 — Local record of every voiceprint matching decision, kept so
+        // the shipped thresholds can be calibrated on real post-AEC meetings
+        // instead of on borrowed clean-corpus numbers. Distances joined to the
+        // label a user actually typed are identifying, so these rows stay on
+        // the machine, never enter a support bundle, and expire.
+        migrator.registerMigration("v0.40-speaker-match-journal") { db in
+            try db.execute(sql: """
+                CREATE TABLE speaker_match_journal (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    transcriptionId TEXT NOT NULL
+                        REFERENCES transcriptions(id) ON DELETE CASCADE,
+                    speakerId TEXT NOT NULL,
+                    profileId TEXT
+                        REFERENCES speaker_profiles(id) ON DELETE CASCADE,
+                    outcome TEXT NOT NULL CHECK (
+                        outcome IN (
+                            'suggested', 'belowSpeechGate', 'noComparableProfile',
+                            'pastThreshold', 'marginTooSmall', 'notMutualBestMatch'
+                        )
+                    ),
+                    topDistance REAL,
+                    runnerUpDistance REAL,
+                    speechSeconds REAL NOT NULL,
+                    createdAt TEXT NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_speaker_match_journal_created
+                ON speaker_match_journal (createdAt)
+                """)
+        }
+
         return migrator
     }
 
