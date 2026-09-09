@@ -86,13 +86,15 @@ final class MockLLMClient: LLMClientProtocol, @unchecked Sendable {
             for token in tokens {
                 continuation.yield(.text(token))
             }
-            continuation.yield(.completed(LLMStreamTerminal(
-                provider: context.providerConfig.id.rawValue,
-                model: responseModel,
-                usage: responseUsage.map(LLMUsage.init),
-                stopReason: responseFinishReason,
-                effectiveSettings: options.effectiveInferenceSettings
-            )))
+            continuation.yield(
+                .completed(
+                    LLMStreamTerminal(
+                        provider: context.providerConfig.id.rawValue,
+                        model: responseModel,
+                        usage: responseUsage.map(LLMUsage.init),
+                        stopReason: responseFinishReason,
+                        effectiveSettings: options.effectiveInferenceSettings
+                    )))
             continuation.finish()
         }
     }
@@ -108,12 +110,37 @@ final class MockLLMClient: LLMClientProtocol, @unchecked Sendable {
     var modelsList: [String] = []
     var listModelsError: Error?
     var listModelsCallCount = 0
+    var listModelsCompletedCount = 0
+    var listModelsDelayNs: UInt64 = 0
+    var holdListModels = false
+    private var listModelsHoldContinuation: CheckedContinuation<Void, Never>?
 
+    @MainActor
+    func releaseHeldListModels() {
+        holdListModels = false
+        listModelsHoldContinuation?.resume()
+        listModelsHoldContinuation = nil
+    }
+
+    @MainActor
     func listModels(context: LLMExecutionContext) async throws -> [String] {
-        listModelsCallCount += 1
         capturedContext = context
-        if let error = listModelsError { throw error }
-        return modelsList
+        let snapshot = modelsList
+        let error = listModelsError
+        let delayNs = listModelsDelayNs
+        let shouldHold = holdListModels
+        listModelsCallCount += 1
+        defer { listModelsCompletedCount += 1 }
+        if shouldHold {
+            await withCheckedContinuation { continuation in
+                listModelsHoldContinuation = continuation
+            }
+        }
+        if delayNs > 0 {
+            try await Task.sleep(nanoseconds: delayNs)
+        }
+        if let error { throw error }
+        return snapshot
     }
 
     func withInProcessLocalModelRemoval(_ operation: @Sendable () async throws -> Void) async throws {
@@ -498,7 +525,6 @@ final class LLMServiceTests: XCTestCase {
         XCTAssertEqual(mockClient.capturedMessages.count, 2)
         XCTAssertEqual(mockClient.capturedMessages[1].content, "input text")
     }
-
 
     func testLegacyServiceConformerRejectsSettingsInsteadOfIgnoringThem() async {
         let legacy: any LLMServiceProtocol = MockTransformLLMService()
