@@ -52,6 +52,7 @@ struct MeetingClassificationBadges: View {
 struct MeetingClassificationFilterBar: View {
     @Bindable var libraryViewModel: TranscriptionLibraryViewModel
     @State private var showingLabelFilters = false
+    @State private var showingLabelManager = false
 
     var body: some View {
         HStack(spacing: 7) {
@@ -71,6 +72,10 @@ struct MeetingClassificationFilterBar: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Transcription label filters")
+        .sheet(isPresented: $showingLabelManager) {
+            MeetingLabelManagementSheet(viewModel: libraryViewModel.meetingClassificationViewModel)
+                .frame(width: 460, height: 520)
+        }
     }
 
     private var labelMenu: some View {
@@ -87,7 +92,11 @@ struct MeetingClassificationFilterBar: View {
         .popover(isPresented: $showingLabelFilters, arrowEdge: .bottom) {
             MeetingLabelFilterPopover(
                 libraryViewModel: libraryViewModel,
-                onDismiss: { showingLabelFilters = false }
+                onDismiss: { showingLabelFilters = false },
+                onManage: {
+                    showingLabelFilters = false
+                    showingLabelManager = true
+                }
             )
         }
     }
@@ -115,6 +124,7 @@ struct MeetingClassificationFilterBar: View {
 private struct MeetingLabelFilterPopover: View {
     @Bindable var libraryViewModel: TranscriptionLibraryViewModel
     let onDismiss: () -> Void
+    let onManage: () -> Void
     @State private var query = ""
     @State private var showingSelectedOnly = false
     @FocusState private var searchFocused: Bool
@@ -144,6 +154,11 @@ private struct MeetingLabelFilterPopover: View {
             LabelPopoverOptionsViewport {
                 filterOptions
             }
+
+            Button("Manage labels…", action: onManage)
+                .buttonStyle(.plain)
+                .font(DesignSystem.Typography.caption.weight(.medium))
+                .foregroundStyle(DesignSystem.Colors.accent)
 
             if libraryViewModel.hasMeetingClassificationFilter {
                 Divider()
@@ -246,6 +261,7 @@ struct MeetingClassificationEditor: View {
     let transcription: Transcription
     @Bindable var viewModel: MeetingClassificationViewModel
     let onDismiss: () -> Void
+    let onManage: () -> Void
     @State private var newLabelName = ""
     @FocusState private var searchFocused: Bool
 
@@ -265,6 +281,11 @@ struct MeetingClassificationEditor: View {
                 editorOptions
             }
 
+            Button("Manage labels…", action: onManage)
+                .buttonStyle(.plain)
+                .font(DesignSystem.Typography.caption.weight(.medium))
+                .foregroundStyle(DesignSystem.Colors.accent)
+
             if viewModel.updatingTranscriptionIDs.contains(transcription.id) {
                 HStack(spacing: 7) {
                     ParakeetSpinner(.inline)
@@ -282,6 +303,7 @@ struct MeetingClassificationEditor: View {
         }
         .padding(DesignSystem.Spacing.md)
         .background(DesignSystem.Colors.contentBackground)
+        .fixedSize(horizontal: false, vertical: true)
         .onAppear {
             viewModel.loadOptions()
             viewModel.loadClassification(for: transcription.id)
@@ -485,6 +507,324 @@ struct LabelPopoverOptionsViewport<Content: View>: View {
             .frame(height: LabelPopoverOptionsLayout.maximumHeight)
         }
         .frame(maxHeight: LabelPopoverOptionsLayout.maximumHeight)
+    }
+}
+
+private struct MeetingLabelManagementSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var viewModel: MeetingClassificationViewModel
+    @State private var query = ""
+    @State private var renamingLabel: MeetingLabel?
+    @State private var showingNewLabel = false
+
+    private var labels: [MeetingLabel] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return viewModel.managedMeetingLabels }
+        return viewModel.managedMeetingLabels.filter {
+            $0.name.localizedCaseInsensitiveContains(trimmed)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.md) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Manage labels")
+                        .font(DesignSystem.Typography.sectionTitle)
+                    Text("Rename and color labels across your library.")
+                        .font(DesignSystem.Typography.caption)
+                        .foregroundStyle(DesignSystem.Colors.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: DesignSystem.Spacing.md)
+
+                if viewModel.isUpdatingLabels {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                Button("New label") { showingNewLabel = true }
+                    .parakeetAction(.primary)
+                    .disabled(viewModel.isUpdatingLabels)
+
+                Button("Done") { dismiss() }
+                    .parakeetAction(.secondary)
+            }
+
+            searchField
+
+            if let errorMessage = viewModel.errorMessage {
+                Text(errorMessage)
+                    .font(DesignSystem.Typography.caption)
+                    .foregroundStyle(DesignSystem.Colors.errorRed)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if labels.isEmpty {
+                        emptyState
+                    } else {
+                        ForEach(Array(labels.enumerated()), id: \.element.id) { index, label in
+                            labelRow(label)
+                            if index < labels.count - 1 {
+                                Divider()
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: .infinity)
+        }
+        .padding(DesignSystem.Spacing.xl)
+        .background(DesignSystem.Colors.contentBackground)
+        .onAppear {
+            viewModel.clearError()
+            viewModel.loadOptions()
+        }
+        .sheet(item: $renamingLabel) { label in
+            MeetingLabelNameSheet(label: label, viewModel: viewModel)
+                .frame(width: 360)
+        }
+        .sheet(isPresented: $showingNewLabel) {
+            MeetingLabelNameSheet(label: nil, viewModel: viewModel)
+                .frame(width: 360)
+        }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(DesignSystem.Colors.textTertiary)
+            TextField("Search labels", text: $query)
+                .textFieldStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(DesignSystem.Colors.surfaceElevated)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(DesignSystem.Colors.border, lineWidth: 0.6)
+        )
+    }
+
+    @ViewBuilder
+    private var emptyState: some View {
+        Text(
+            query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "No labels yet."
+                : "No labels match \(query)."
+        )
+        .font(DesignSystem.Typography.bodySmall)
+        .foregroundStyle(DesignSystem.Colors.textTertiary)
+        .frame(maxWidth: .infinity, minHeight: 180, alignment: .center)
+    }
+
+    private func labelRow(_ label: MeetingLabel) -> some View {
+        HStack(spacing: DesignSystem.Spacing.sm) {
+            Circle()
+                .fill(MeetingLabelTint.color(for: label))
+                .frame(width: 9, height: 9)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label.name)
+                    .font(DesignSystem.Typography.bodySmall.weight(.medium))
+                    .foregroundStyle(DesignSystem.Colors.textPrimary)
+                    .lineLimit(1)
+                    .help(label.name)
+                Text(label.isArchived ? "Archived" : labelColorDescription(label))
+                    .font(DesignSystem.Typography.micro)
+                    .foregroundStyle(DesignSystem.Colors.textTertiary)
+            }
+
+            Spacer(minLength: 0)
+
+            Menu {
+                Button("Rename…") {
+                    renamingLabel = label
+                }
+
+                Menu("Color") {
+                    ForEach(MeetingLabelColorOption.allCases) { option in
+                        Button {
+                            Task {
+                                _ = await viewModel.updateMeetingLabel(
+                                    label.id,
+                                    with: .color(option.token)
+                                ).value
+                            }
+                        } label: {
+                            HStack {
+                                Circle()
+                                    .fill(option.color(for: label))
+                                    .frame(width: 8, height: 8)
+                                Text(option.title)
+                                if option == MeetingLabelColorOption(colorToken: label.colorToken) {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Divider()
+
+                Button(label.isArchived ? "Restore" : "Archive") {
+                    Task {
+                        _ = await viewModel.setMeetingLabelArchived(
+                            label.id,
+                            isArchived: !label.isArchived
+                        ).value
+                    }
+                }
+                .help(
+                    label.isArchived
+                        ? "Restore \(label.name) to new label choices."
+                        : "Archive \(label.name). Existing assignments and label-targeted prompt rules are retained."
+                )
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(viewModel.isUpdatingLabels)
+            .accessibilityLabel("Actions for \(label.name)")
+        }
+        .padding(.vertical, 8)
+    }
+
+    private func labelColorDescription(_ label: MeetingLabel) -> String {
+        MeetingLabelColorOption(colorToken: label.colorToken).title
+    }
+}
+
+private struct MeetingLabelNameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let label: MeetingLabel?
+    @Bindable var viewModel: MeetingClassificationViewModel
+    @State private var name = ""
+    @State private var isSaving = false
+    @FocusState private var nameFocused: Bool
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.md) {
+            Text(label == nil ? "New label" : "Rename label")
+                .font(DesignSystem.Typography.sectionTitle)
+
+            TextField("Label name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .focused($nameFocused)
+                .onSubmit(save)
+
+            if let errorMessage = viewModel.errorMessage {
+                Text(errorMessage)
+                    .font(DesignSystem.Typography.caption)
+                    .foregroundStyle(DesignSystem.Colors.errorRed)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button(isSaving ? "Saving…" : "Save", action: save)
+                    .parakeetAction(.primary)
+                    .disabled(trimmedName.isEmpty || isSaving || viewModel.isUpdatingLabels)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(DesignSystem.Spacing.xl)
+        .onAppear {
+            name = label?.name ?? ""
+            viewModel.clearError()
+            nameFocused = true
+        }
+    }
+
+    private func save() {
+        guard !trimmedName.isEmpty, !isSaving, !viewModel.isUpdatingLabels else { return }
+        isSaving = true
+        Task {
+            let saved: Bool
+            if let label {
+                saved = await viewModel.updateMeetingLabel(label.id, with: .rename(name)).value
+            } else {
+                saved = await viewModel.createMeetingLabel(named: name).value
+            }
+            if saved {
+                dismiss()
+            } else {
+                isSaving = false
+            }
+        }
+    }
+}
+
+private enum MeetingLabelColorOption: CaseIterable, Identifiable, Hashable {
+    case automatic
+    case coral
+    case green
+    case amber
+    case red
+    case purple
+    case blue
+
+    init(colorToken: String?) {
+        switch colorToken?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "coral", "orange": self = .coral
+        case "green": self = .green
+        case "amber", "yellow": self = .amber
+        case "red": self = .red
+        case "purple": self = .purple
+        case "blue": self = .blue
+        default: self = .automatic
+        }
+    }
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .automatic: return "Automatic"
+        case .coral: return "Coral"
+        case .green: return "Green"
+        case .amber: return "Amber"
+        case .red: return "Red"
+        case .purple: return "Purple"
+        case .blue: return "Blue"
+        }
+    }
+
+    var token: String? {
+        switch self {
+        case .automatic: return nil
+        case .coral: return "coral"
+        case .green: return "green"
+        case .amber: return "amber"
+        case .red: return "red"
+        case .purple: return "purple"
+        case .blue: return "blue"
+        }
+    }
+
+    func color(for label: MeetingLabel) -> Color {
+        guard let token else { return MeetingLabelTint.color(for: label) }
+        var colored = label
+        colored.colorToken = token
+        return MeetingLabelTint.color(for: colored)
     }
 }
 
@@ -733,18 +1073,30 @@ private struct MeetingClassificationPopoverModifier: ViewModifier {
     @Binding var item: Transcription?
     let transcription: Transcription
     let viewModel: MeetingClassificationViewModel?
+    @State private var showingLabelManager = false
 
     func body(content: Content) -> some View {
-        content.popover(isPresented: isPresented, arrowEdge: .top) {
-            if let viewModel {
-                MeetingClassificationEditor(
-                    transcription: transcription,
-                    viewModel: viewModel,
-                    onDismiss: { item = nil }
-                )
-                .frame(width: 340)
+        content
+            .popover(isPresented: isPresented, arrowEdge: .top) {
+                if let viewModel {
+                    MeetingClassificationEditor(
+                        transcription: transcription,
+                        viewModel: viewModel,
+                        onDismiss: { item = nil },
+                        onManage: {
+                            item = nil
+                            showingLabelManager = true
+                        }
+                    )
+                    .frame(width: 340)
+                }
             }
-        }
+            .sheet(isPresented: $showingLabelManager) {
+                if let viewModel {
+                    MeetingLabelManagementSheet(viewModel: viewModel)
+                        .frame(width: 460, height: 520)
+                }
+            }
     }
 
     private var isPresented: Binding<Bool> {

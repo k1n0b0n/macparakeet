@@ -93,6 +93,10 @@ by checking exit code first: `2` = misuse, `1` = runtime, `0` = success.
 
 ### Added
 
+- `meetings labels set` renames existing labels, chooses a color, or resets
+  to the automatic color with `--automatic-color`. Existing label IDs and
+  assignments are preserved; `--json` supports agent workflows.
+
 - `prompts collections list|add|rename|delete|reorder` manages the same local
   prompt collections as the app. Collection mutations use full UUIDs, JSON
   returns saved collection records, deletion unfiles prompts without deleting

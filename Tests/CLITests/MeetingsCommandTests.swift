@@ -71,6 +71,7 @@ final class MeetingsCommandTests: XCTestCase {
         XCTAssertNoThrow(try MeetingsCommand.TypesSubcommand.Archive.parse(["Customer", "--json"]))
         XCTAssertNoThrow(try MeetingsCommand.LabelsSubcommand.List.parse(["--json"]))
         XCTAssertNoThrow(try MeetingsCommand.LabelsSubcommand.Add.parse(["--name", "QBR", "--json"]))
+        XCTAssertNoThrow(try MeetingsCommand.LabelsSubcommand.Set.parse(["QBR", "--color", "blue", "--json"]))
         XCTAssertNoThrow(try MeetingsCommand.ClassifySubcommand.parse([
             "Meeting", "--type", "Customer", "--add-label", "QBR", "--json",
         ]))
@@ -108,13 +109,135 @@ final class MeetingsCommandTests: XCTestCase {
         XCTAssertEqual(renamedType["name"] as? String, "Client")
 
         let addLabel = try MeetingsCommand.LabelsSubcommand.Add.parse([
-            "--name", "  QBR  ", "--color", "  green  ", "--json", "--database", dbURL.path,
+            "--name", "  QBR  ", "--color", "  indigo  ", "--json", "--database", dbURL.path,
         ])
         let labelOutput = try captureStandardOutput { try addLabel.run() }
         let label = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(labelOutput.utf8)) as? [String: Any])
         XCTAssertEqual(label["name"] as? String, "QBR")
-        XCTAssertEqual(label["colorToken"] as? String, "green")
+        XCTAssertEqual(label["colorToken"] as? String, "indigo")
     }
+
+    func testMeetingLabelSetCanonicalizesOrClearsColorAndRejectsInvalidUpdates() throws {
+        let dbURL = temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: dbURL) }
+        let db = try DatabaseManager(path: dbURL.path)
+        let repo = MeetingLabelRepository(dbQueue: db.dbQueue)
+        let original = MeetingLabel(name: "QBR", colorToken: "green")
+        try repo.save(original)
+
+        let update = try MeetingsCommand.LabelsSubcommand.Set.parse([
+            original.id.uuidString,
+            "--name", "  Customer review  ",
+            "--color", " orange ",
+            "--json",
+            "--database", dbURL.path,
+        ])
+        let updatedOutput = try captureStandardOutput { try update.run() }
+        let updated = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(updatedOutput.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(updated["name"] as? String, "Customer review")
+        XCTAssertEqual(updated["colorToken"] as? String, "coral")
+
+        let reset = try MeetingsCommand.LabelsSubcommand.Set.parse([
+            original.id.uuidString,
+            "--automatic-color",
+            "--json",
+            "--database", dbURL.path,
+        ])
+        let resetOutput = try captureStandardOutput { try reset.run() }
+        let resetValue = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(resetOutput.utf8)) as? [String: Any]
+        )
+        XCTAssertNil(resetValue["colorToken"])
+        XCTAssertNil(try repo.fetch(id: original.id)?.colorToken)
+
+        let invalid = try MeetingsCommand.LabelsSubcommand.Set.parse([
+            original.id.uuidString,
+            "--color", "magenta",
+            "--json",
+            "--database", dbURL.path,
+        ])
+        var invalidError: Error?
+        let invalidOutput = try captureStandardOutput {
+            do {
+                try invalid.run()
+            } catch {
+                invalidError = error
+            }
+        }
+        let error = try XCTUnwrap(invalidError)
+        XCTAssertTrue(error is CLIJSONEnvelopeExit)
+        XCTAssertEqual(CLI.normalizedExitCode(for: error), cliValidationMisuseExitCode)
+        let invalidEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(invalidOutput.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(invalidEnvelope["ok"] as? Bool, false)
+        XCTAssertEqual(invalidEnvelope["errorType"] as? String, "validation")
+        XCTAssertNil(try repo.fetch(id: original.id)?.colorToken)
+
+        let noChange = try MeetingsCommand.LabelsSubcommand.Set.parse([
+            original.id.uuidString,
+            "--json",
+            "--database", dbURL.path,
+        ])
+        var noChangeError: Error?
+        let noChangeOutput = try captureStandardOutput {
+            do {
+                try noChange.run()
+            } catch {
+                noChangeError = error
+            }
+        }
+        XCTAssertTrue(noChangeError is CLIJSONEnvelopeExit)
+        let noChangeEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(noChangeOutput.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(noChangeEnvelope["errorType"] as? String, "validation")
+        XCTAssertNil(try repo.fetch(id: original.id)?.colorToken)
+
+        let existing = MeetingLabel(name: "Résumé")
+        try repo.save(existing)
+        let duplicate = try MeetingsCommand.LabelsSubcommand.Set.parse([
+            original.id.uuidString,
+            "--name", "resume",
+            "--json",
+            "--database", dbURL.path,
+        ])
+        var duplicateError: Error?
+        _ = try captureStandardOutput {
+            do {
+                try duplicate.run()
+            } catch {
+                duplicateError = error
+            }
+        }
+        XCTAssertTrue(duplicateError is CLIJSONEnvelopeExit)
+        XCTAssertEqual(try repo.fetch(id: original.id)?.name, "Customer review")
+
+        let exclusive = try MeetingsCommand.LabelsSubcommand.Set.parse([
+            original.id.uuidString,
+            "--color", "blue",
+            "--automatic-color",
+            "--json",
+            "--database", dbURL.path,
+        ])
+        var exclusiveError: Error?
+        let exclusiveOutput = try captureStandardOutput {
+            do {
+                try exclusive.run()
+            } catch {
+                exclusiveError = error
+            }
+        }
+        XCTAssertTrue(exclusiveError is CLIJSONEnvelopeExit)
+        let exclusiveEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(exclusiveOutput.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(exclusiveEnvelope["errorType"] as? String, "validation")
+        XCTAssertNil(try repo.fetch(id: original.id)?.colorToken)
+    }
+
     func testMeetingsCommandIsRegisteredAtTopLevel() {
         XCTAssertTrue(
             CLI.configuration.subcommands.contains { $0 == MeetingsCommand.self },

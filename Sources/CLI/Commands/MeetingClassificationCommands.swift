@@ -109,8 +109,26 @@ extension MeetingsCommand {
         static let configuration = CommandConfiguration(
             commandName: "labels",
             abstract: "Manage reusable meeting labels.",
-            subcommands: [List.self, Add.self, Rename.self, Archive.self]
+            subcommands: [List.self, Add.self, Rename.self, Set.self, Archive.self]
         )
+
+        private static let canonicalColorTokens = ["coral", "green", "amber", "red", "purple", "blue"]
+
+        private static func canonicalColorToken(_ color: String) throws -> String {
+            switch color.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "coral", "orange": return "coral"
+            case "green": return "green"
+            case "amber", "yellow": return "amber"
+            case "red": return "red"
+            case "purple": return "purple"
+            case "blue": return "blue"
+            default:
+                throw ValidationError(
+                    "--color must be one of: \(canonicalColorTokens.joined(separator: ", ")). "
+                        + "Use --automatic-color to clear an explicit color."
+                )
+            }
+        }
 
         struct List: ParsableCommand {
             static let configuration = CommandConfiguration(commandName: "list")
@@ -181,6 +199,60 @@ extension MeetingsCommand {
                     if json { try printJSON(stored) }
                     else { print("Renamed meeting label to '\(stored.name)'.") }
                 }
+            }
+        }
+
+        struct Set: ParsableCommand {
+            static let configuration = CommandConfiguration(commandName: "set")
+            @Argument(help: "Label UUID, prefix, or exact name.") var label: String
+            @Option(name: .long, help: "New name.") var name: String?
+            @Option(name: .long, help: "Label color: coral, green, amber, red, purple, or blue.") var color: String?
+            @Flag(name: .long, help: "Clear the explicit color and use the automatic label color.")
+            var automaticColor = false
+            @Flag(name: .long, help: "Emit JSON.") var json = false
+            @Option var database: String?
+
+            func run() throws {
+                try emitJSONOrRethrow(json: json) {
+                    let requestedName = try normalizedName()
+                    let requestedColor = try color.map(LabelsSubcommand.canonicalColorToken)
+                    guard requestedName != nil || requestedColor != nil || automaticColor else {
+                        throw ValidationError("specify --name, --color, or --automatic-color")
+                    }
+                    guard requestedColor == nil || !automaticColor else {
+                        throw ValidationError("--color and --automatic-color are mutually exclusive")
+                    }
+                    let db = try makeDatabaseManager(database: database)
+                    let repo = MeetingLabelRepository(dbQueue: db.dbQueue)
+                    var value = try findMeetingLabel(label, repo: repo, includeArchived: true)
+                    if let requestedName {
+                        let labels = try repo.fetchAll(includeArchived: true)
+                        guard !labels.contains(where: {
+                            $0.id != value.id
+                                && $0.name.compare(
+                                    requestedName,
+                                    options: [.caseInsensitive, .diacriticInsensitive]
+                                ) == .orderedSame
+                        }) else {
+                            throw ValidationError("A label named '\(requestedName)' already exists.")
+                        }
+                        value.name = requestedName
+                    }
+                    if let requestedColor { value.colorToken = requestedColor }
+                    if automaticColor { value.colorToken = nil }
+                    value.updatedAt = Date()
+                    try repo.save(value)
+                    let stored = try repo.fetch(id: value.id) ?? value
+                    if json { try printJSON(stored) }
+                    else { print("Updated meeting label '\(stored.name)'.") }
+                }
+            }
+
+            private func normalizedName() throws -> String? {
+                guard let name else { return nil }
+                let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalized.isEmpty else { throw ValidationError("--name must not be empty") }
+                return normalized
             }
         }
 

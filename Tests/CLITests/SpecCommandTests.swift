@@ -73,6 +73,7 @@ final class SpecCommandTests: XCTestCase {
         XCTAssertTrue(paths.contains(["meetings", "classify"]))
         XCTAssertTrue(paths.contains(["meetings", "types", "list"]))
         XCTAssertTrue(paths.contains(["meetings", "labels", "list"]))
+        XCTAssertTrue(paths.contains(["meetings", "labels", "set"]))
         XCTAssertTrue(paths.contains(["prompts", "history"]))
         XCTAssertTrue(paths.contains(["prompts", "diff"]))
         XCTAssertTrue(paths.contains(["prompts", "restore-deleted"]))
@@ -83,6 +84,13 @@ final class SpecCommandTests: XCTestCase {
         let writeback = try XCTUnwrap(commands.first { ($0["path"] as? [String]) == ["meetings", "results", "add"] })
         XCTAssertEqual(writeback["readOnly"] as? Bool, false)
         XCTAssertEqual(writeback["jsonMode"] as? String, "--json")
+
+        let labelSet = try XCTUnwrap(commands.first { ($0["path"] as? [String]) == ["meetings", "labels", "set"] })
+        XCTAssertEqual(labelSet["readOnly"] as? Bool, false)
+        XCTAssertEqual(labelSet["output"] as? String, "MeetingLabel object.")
+        let labelSetOptions = try XCTUnwrap(labelSet["options"] as? [[String: Any]])
+        XCTAssertTrue(labelSetOptions.contains { ($0["name"] as? String) == "--color" })
+        XCTAssertTrue(labelSetOptions.contains { ($0["name"] as? String) == "--automatic-color" })
 
         let artifact = try XCTUnwrap(commands.first { ($0["path"] as? [String]) == ["meetings", "artifact"] })
         XCTAssertEqual(artifact["readOnly"] as? Bool, false)

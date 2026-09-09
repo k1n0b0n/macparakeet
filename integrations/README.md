@@ -607,6 +607,8 @@ Manage local meeting classification and assign it atomically:
 macparakeet-cli meetings types list --json
 macparakeet-cli meetings types add --name "Customer" --json
 macparakeet-cli meetings labels add --name "QBR" --json
+macparakeet-cli meetings labels set "QBR" --color blue --json
+macparakeet-cli meetings labels set "QBR" --automatic-color --json
 macparakeet-cli meetings classify <meeting> --type "Customer" --add-label "QBR" --json
 macparakeet-cli meetings classify <meeting> --type none --remove-label "QBR" --json
 ```
@@ -615,6 +617,10 @@ The compatibility surface retains zero or one primary type and any number of
 labels per meeting. Labels drive prompt availability and support search;
 legacy types no longer control prompt selection. Names remain local user data.
 Changing a completed meeting's classification does not rerun prompts retroactively.
+Use `meetings labels set` to rename a label or choose one of the explicit
+`coral`, `green`, `amber`, `red`, `purple`, or `blue` colors. Pass
+`--automatic-color` to clear an explicit color and return to the stable
+identity-based color.
 
 Use `meetings notes` for user-authored notes. Use `meetings results add` for
 externally generated summaries, decisions, action items, or other agent output;

@@ -1,44 +1,32 @@
 import AppKit
-import Combine
 import SwiftUI
 import XCTest
+import MacParakeetCore
+import MacParakeetViewModels
 @testable import MacParakeet
 
-/// Native sizing tests for the shared label-popover option viewport.
+/// Layout contracts for the shared label-options viewport and its editor host.
 ///
-/// The viewport intentionally lets a short option list determine a popover's
-/// fitting height. It only introduces scrolling after the list reaches its
-/// cap, which avoids the one-point geometry-preference feedback loop that
-/// could hide label chips and the create action.
+/// These use `NSHostingView` fitting sizes. A SwiftUI `.popover` needs a live
+/// AppKit window; creating and closing that private window in XCTest crashed
+/// in AppKit's popover appearance observer during teardown.
 @MainActor
 final class LabelPopoverOptionsViewportTests: XCTestCase {
-    // The native popover wraps the viewport with a small AppKit fitting inset.
-    // This keeps the behavior assertion independent of that private chrome
-    // while still rejecting an unbounded list.
-    private let maximumBoundedPopoverHeight: CGFloat = 300
-
-    private final class QueryState: ObservableObject {
-        @Published var query = ""
-    }
+    private let viewportMaximumHeight: CGFloat = 260
 
     private struct FilterOptions: View {
-        @ObservedObject var state: QueryState
         let labels: [String]
-
-        private var matches: [String] {
-            guard !state.query.isEmpty else { return labels }
-            return labels.filter { $0.localizedCaseInsensitiveContains(state.query) }
-        }
+        let emptyMessage: String
 
         var body: some View {
             LabelPopoverOptionsViewport {
                 VStack(alignment: .leading, spacing: 2) {
-                    if matches.isEmpty {
-                        Text("No labels match \(state.query)")
+                    if labels.isEmpty {
+                        Text(emptyMessage)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.vertical, 5)
                     } else {
-                        ForEach(matches, id: \.self) { label in
+                        ForEach(labels, id: \.self) { label in
                             Text(label)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.vertical, 5)
@@ -50,116 +38,111 @@ final class LabelPopoverOptionsViewportTests: XCTestCase {
         }
     }
 
-    /// Exercises the same SwiftUI `.popover` presentation used by the label
-    /// controls. A manually constructed `NSPopover` starts at AppKit's 320pt
-    /// default and bypasses SwiftUI's fitting-size update path.
-    private struct PopoverHost<Content: View>: View {
-        let content: Content
-        @State private var isPresented = true
-
-        var body: some View {
-            Color.clear
-                .frame(width: 1, height: 1)
-                .popover(isPresented: $isPresented, arrowEdge: .bottom) {
-                    content
-                }
-        }
+    private final class StaticTypeRepository: MeetingTypeRepositoryProtocol, @unchecked Sendable {
+        func save(_ meetingType: MeetingType) throws {}
+        func fetch(id: UUID) throws -> MeetingType? { nil }
+        func fetchAll(includeArchived: Bool) throws -> [MeetingType] { [] }
+        func setArchived(id: UUID, isArchived: Bool) throws {}
+        func delete(id: UUID) throws -> Bool { false }
     }
 
-    private struct PresentedPopover {
-        let popoverWindow: NSWindow
-        let anchorWindow: NSWindow
-    }
+    private final class StaticLabelRepository: MeetingLabelRepositoryProtocol, @unchecked Sendable {
+        let labels: [MeetingLabel]
 
-    private func show<Content: View>(_ content: Content) throws -> PresentedPopover {
-        _ = NSApplication.shared
-        let existingWindows = Set(NSApplication.shared.windows.map(ObjectIdentifier.init))
-        let host = NSHostingView(rootView: PopoverHost(content: content))
-        let anchorWindow = NSWindow(
-            contentRect: NSRect(x: -20_000, y: -20_000, width: 1, height: 1),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        anchorWindow.contentView = host
-        anchorWindow.orderFront(nil)
-
-        let deadline = Date().addingTimeInterval(2)
-        while Date() < deadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-            if let popoverWindow = NSApplication.shared.windows.first(where: {
-                !existingWindows.contains(ObjectIdentifier($0))
-                    && $0 !== anchorWindow
-                    && NSStringFromClass(type(of: $0)).contains("Popover")
-            }) {
-                settle(popoverWindow)
-                return PresentedPopover(popoverWindow: popoverWindow, anchorWindow: anchorWindow)
-            }
+        init(labels: [MeetingLabel]) {
+            self.labels = labels
         }
 
-        anchorWindow.close()
-        throw NSError(
-            domain: "LabelPopoverOptionsViewportTests",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "SwiftUI did not present a native popover"]
+        func save(_ label: MeetingLabel) throws {}
+        func fetch(id: UUID) throws -> MeetingLabel? { labels.first { $0.id == id } }
+        func fetchAll(includeArchived: Bool) throws -> [MeetingLabel] { labels }
+        func setArchived(id: UUID, isArchived: Bool) throws {}
+        func delete(id: UUID) throws -> Bool { false }
+    }
+
+    private final class StaticClassificationService: MeetingClassificationServiceProtocol, @unchecked Sendable {
+        let classification: MeetingClassification
+
+        init(classification: MeetingClassification) {
+            self.classification = classification
+        }
+
+        func classification(for transcriptionId: UUID) throws -> MeetingClassification { classification }
+        func setMeetingType(_ meetingTypeId: UUID?, for transcriptionId: UUID) async throws {}
+        func replaceLabels(_ labelIds: Set<UUID>, for transcriptionId: UUID) async throws {}
+        func update(
+            meetingTypeId: UUID?,
+            labelIds: Set<UUID>,
+            for transcriptionId: UUID
+        ) async throws {}
+    }
+
+    private func fittingHeight<Content: View>(of content: Content, width: CGFloat = 320) -> CGFloat {
+        let host = NSHostingView(rootView: content.frame(width: width))
+        host.layoutSubtreeIfNeeded()
+        return host.fittingSize.height
+    }
+
+    private func makeEditor(labelCount: Int) async -> MeetingClassificationEditor {
+        let labels = (1...labelCount).map { MeetingLabel(name: "Label \($0)", sortOrder: $0) }
+        let transcription = Transcription(
+            fileName: "Layout fixture",
+            status: .completed,
+            sourceType: .meeting
+        )
+        let viewModel = MeetingClassificationViewModel()
+        viewModel.configure(
+            typeRepository: StaticTypeRepository(),
+            labelRepository: StaticLabelRepository(labels: labels),
+            service: StaticClassificationService(
+                classification: MeetingClassification(meetingType: nil, labels: labels)
+            )
+        )
+        await viewModel.loadOptions().value
+        await viewModel.loadClassification(for: transcription.id).value
+
+        return MeetingClassificationEditor(
+            transcription: transcription,
+            viewModel: viewModel,
+            onDismiss: {},
+            onManage: {}
         )
     }
 
-    private func settle(_ popoverWindow: NSWindow) {
-        popoverWindow.contentView?.layoutSubtreeIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-    }
-
-    private func dismiss(_ presented: PresentedPopover) {
-        presented.popoverWindow.close()
-        presented.anchorWindow.close()
-    }
-
-    private func height<Content: View>(of content: Content) throws -> CGFloat {
-        let presented = try show(content)
-        defer { dismiss(presented) }
-        return presented.popoverWindow.contentView?.fittingSize.height ?? 0
-    }
-
-    func testEmptyAndFewOptionsUseNaturalPopoverHeights() throws {
-        let emptyHeight = try height(of: FilterOptions(state: QueryState(), labels: []))
-        let fewHeight = try height(
-            of: FilterOptions(state: QueryState(), labels: ["Research", "Planning", "Follow-up"]))
+    func testEmptyAndFewOptionsUseNaturalHeights() {
+        let emptyHeight = fittingHeight(of: FilterOptions(labels: [], emptyMessage: "No selected labels"))
+        let fewHeight = fittingHeight(
+            of: FilterOptions(
+                labels: ["Research", "Planning", "Follow-up"],
+                emptyMessage: "No labels match missing"
+            )
+        )
 
         XCTAssertGreaterThan(emptyHeight, 0)
-        XCTAssertLessThan(emptyHeight, maximumBoundedPopoverHeight)
+        XCTAssertLessThan(emptyHeight, viewportMaximumHeight)
         XCTAssertGreaterThan(fewHeight, emptyHeight)
-        XCTAssertLessThan(fewHeight, maximumBoundedPopoverHeight)
+        XCTAssertLessThan(fewHeight, viewportMaximumHeight)
     }
 
-    func testManyOptionsUseBoundedScrollablePopoverHeight() throws {
-        let labels = (1...40).map { "Label \($0)" }
-        let optionsHeight = try height(of: FilterOptions(state: QueryState(), labels: labels))
+    func testManyOptionsUseBoundedScrollableHeight() {
+        let optionsHeight = fittingHeight(
+            of: FilterOptions(
+                labels: (1...40).map { "Label \($0)" },
+                emptyMessage: "No labels match missing"
+            )
+        )
 
-        XCTAssertLessThanOrEqual(optionsHeight, maximumBoundedPopoverHeight)
-        XCTAssertGreaterThan(optionsHeight, 200)
+        XCTAssertEqual(optionsHeight, viewportMaximumHeight, accuracy: 1)
     }
 
-    func testChangingQueryShrinksAndRegrowsThePopover() throws {
-        let state = QueryState()
-        let labels = (1...40).map { "Label \($0)" }
-        let presented = try show(FilterOptions(state: state, labels: labels))
-        defer { dismiss(presented) }
+    func testActualEditorFitsSelectedLabelsWithoutPopoverDefaultHeight() async {
+        let shortEditor = await makeEditor(labelCount: 2)
+        let longEditor = await makeEditor(labelCount: 40)
+        let shortHeight = fittingHeight(of: shortEditor, width: 340)
+        let longHeight = fittingHeight(of: longEditor, width: 340)
 
-        let manyHeight = presented.popoverWindow.contentView?.fittingSize.height ?? 0
-        state.query = "missing"
-        settle(presented.popoverWindow)
-        let noMatchesHeight = presented.popoverWindow.contentView?.fittingSize.height ?? 0
-        state.query = "Label 40"
-        settle(presented.popoverWindow)
-        let fewMatchesHeight = presented.popoverWindow.contentView?.fittingSize.height ?? 0
-        state.query = ""
-        settle(presented.popoverWindow)
-        let regrownHeight = presented.popoverWindow.contentView?.fittingSize.height ?? 0
-
-        XCTAssertLessThanOrEqual(manyHeight, maximumBoundedPopoverHeight)
-        XCTAssertLessThan(noMatchesHeight, manyHeight)
-        XCTAssertLessThan(fewMatchesHeight, manyHeight)
-        XCTAssertEqual(regrownHeight, manyHeight, accuracy: 1)
+        XCTAssertGreaterThan(shortHeight, 100)
+        XCTAssertLessThan(shortHeight, longHeight)
+        XCTAssertLessThanOrEqual(longHeight - shortHeight, viewportMaximumHeight)
     }
 }

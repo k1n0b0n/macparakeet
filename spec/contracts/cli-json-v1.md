@@ -216,6 +216,13 @@ with human progress/status kept off stdout.
   no labels. `meetings types list --json` and `meetings labels list --json`
   return arrays of those objects. Classification mutation JSON returns the
   meeting id plus its resolved optional type and complete label array.
+- `meetings labels set <label> [--name <name>] [--color <token> |
+  --automatic-color] --json` returns the stored `MeetingLabel` object and
+  requires at least one change. The explicit canonical color tokens are
+  `coral`, `green`, `amber`, `red`, `purple`, and `blue`; `orange` and `yellow`
+  input is normalized to `coral` and `amber`. `--automatic-color` clears
+  `colorToken` and omits it from the returned object. It
+  cannot be combined with `--color`.
 - `meetings list --type` and `--label` resolve a full UUID, an unambiguous UUID
   prefix, or an exact case-insensitive name before applying the filter in SQL.
   Multiple repeated filters use ANY semantics. `--unclassified` cannot be

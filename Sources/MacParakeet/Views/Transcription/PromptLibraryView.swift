@@ -139,17 +139,20 @@ struct PromptLibraryView: View {
             Divider()
 
             ScrollView {
+                let prompts = filteredPrompts
+                let showsKindBadge = shouldShowKindBadge(in: prompts)
+
                 VStack(spacing: DesignSystem.Spacing.lg) {
                     if let errorMessage = viewModel.errorMessage {
                         errorBanner(errorMessage)
                     }
-                    if filteredPrompts.isEmpty {
+                    if prompts.isEmpty {
                         emptyStateView
                     } else {
                         cardGroup {
-                            ForEach(Array(filteredPrompts.enumerated()), id: \.element.id) { index, prompt in
-                                promptRow(prompt)
-                                if index < filteredPrompts.count - 1 { Divider().padding(.leading, 16) }
+                            ForEach(Array(prompts.enumerated()), id: \.element.id) { index, prompt in
+                                promptRow(prompt, showsKindBadge: showsKindBadge)
+                                if index < prompts.count - 1 { Divider().padding(.leading, 16) }
                             }
                         }
                     }
@@ -337,6 +340,13 @@ struct PromptLibraryView: View {
         }
     }
 
+    private func shouldShowKindBadge(in prompts: [Prompt]) -> Bool {
+        presentation.includesTransforms
+            && promptKindFilter == .all
+            && prompts.contains { $0.category == .result }
+            && prompts.contains { $0.category == .transform }
+    }
+
     private var displayedDeletedPrompts: [Prompt] {
         viewModel.deletedPrompts.filter { presentation.includesTransforms || $0.category == .result }
     }
@@ -492,7 +502,7 @@ struct PromptLibraryView: View {
         .cardShadow(DesignSystem.Shadows.cardRest)
     }
 
-    private func promptRow(_ prompt: Prompt) -> some View {
+    private func promptRow(_ prompt: Prompt, showsKindBadge: Bool) -> some View {
         // Treat keyboard focus the same as hover so a Tab-only user gets
         // identical icon brightening + AutoRunBadge reveal.
         let isActive = hoveredPromptId == prompt.id || focusedPromptId == prompt.id
@@ -537,13 +547,15 @@ struct PromptLibraryView: View {
                             .clipShape(Capsule())
                     }
 
-                    Text(prompt.category == .transform ? "Transform" : "Result")
-                        .font(DesignSystem.Typography.caption)
-                        .foregroundStyle(DesignSystem.Colors.textSecondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(DesignSystem.Colors.surfaceElevated)
-                        .clipShape(Capsule())
+                    if showsKindBadge {
+                        Text(prompt.category == .transform ? "Transform" : "Result")
+                            .font(DesignSystem.Typography.caption)
+                            .foregroundStyle(DesignSystem.Colors.textSecondary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(DesignSystem.Colors.surfaceElevated)
+                            .clipShape(Capsule())
+                    }
 
                     if prompt.inferenceSettings?.normalized != nil || prompt.modelOverride != nil {
                         Text("Custom settings")

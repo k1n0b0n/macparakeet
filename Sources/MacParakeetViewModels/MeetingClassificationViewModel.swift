@@ -9,12 +9,14 @@ import os
 public final class MeetingClassificationViewModel {
     public private(set) var meetingTypes: [MeetingType] = []
     public private(set) var meetingLabels: [MeetingLabel] = []
+    public private(set) var managedMeetingLabels: [MeetingLabel] = []
     public private(set) var classifications: [UUID: MeetingClassification] = [:]
     /// Advances only after an authoritative read, never for optimistic labels.
     /// Database-backed consumers refresh on this signal after writes settle,
     /// including successful clears and rollback to the persisted selection.
     public private(set) var classificationRevisions: [UUID: Int] = [:]
     public private(set) var updatingTranscriptionIDs: Set<UUID> = []
+    public private(set) var isUpdatingLabels = false
     public private(set) var isLoadingOptions = false
     public var errorMessage: String?
 
@@ -26,6 +28,7 @@ public final class MeetingClassificationViewModel {
     @ObservationIgnored private var classificationLoadGenerations: [UUID: Int] = [:]
     @ObservationIgnored private var mutationTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var mutationGenerations: [UUID: Int] = [:]
+    @ObservationIgnored private var pendingClassificationRefreshes: Set<UUID> = []
     @ObservationIgnored private var desiredClassifications: [UUID: DesiredClassification] = [:]
     @ObservationIgnored private var initialMutationIntents: [UUID: [ClassificationMutation]] = [:]
     @ObservationIgnored private let logger = Logger(
@@ -68,14 +71,17 @@ public final class MeetingClassificationViewModel {
         let task = Task { @MainActor [weak self, typeRepository, labelRepository] in
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
-                    (
+                    let allLabels = try labelRepository.fetchAll(includeArchived: true)
+                    return (
                         try typeRepository.fetchAll(includeArchived: false),
-                        try labelRepository.fetchAll(includeArchived: false)
+                        allLabels.filter { !$0.isArchived },
+                        allLabels
                     )
                 }.value
                 guard let self, !Task.isCancelled else { return }
                 self.meetingTypes = result.0
                 self.meetingLabels = result.1
+                self.managedMeetingLabels = result.2
                 self.isLoadingOptions = false
             } catch {
                 guard let self, !Task.isCancelled else { return }
@@ -165,24 +171,47 @@ public final class MeetingClassificationViewModel {
     }
 
     @discardableResult
-    public func createMeetingLabel(named name: String, assigningTo transcriptionID: UUID? = nil) -> Task<Void, Never> {
-        guard let labelRepository else { return Task {} }
+    public func createMeetingLabel(named name: String, assigningTo transcriptionID: UUID? = nil) -> Task<Bool, Never> {
+        guard !isUpdatingLabels else { return Task { false } }
+        guard let labelRepository else {
+            errorMessage = "Label management is unavailable."
+            return Task { false }
+        }
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return Task {} }
+        guard !normalized.isEmpty else {
+            errorMessage = "A label name is required."
+            return Task { false }
+        }
         let label = MeetingLabel(name: normalized, sortOrder: meetingLabels.count)
 
+        isUpdatingLabels = true
+        errorMessage = nil
         return Task { @MainActor [weak self, labelRepository] in
+            defer { self?.isUpdatingLabels = false }
             do {
                 try await Task.detached(priority: .userInitiated) {
+                    let existing = try labelRepository.fetchAll(includeArchived: true)
+                    guard
+                        !existing.contains(where: {
+                            $0.name.compare(
+                                normalized,
+                                options: [.caseInsensitive, .diacriticInsensitive]
+                            ) == .orderedSame
+                        })
+                    else {
+                        throw MeetingLabelManagementError.duplicateName(normalized)
+                    }
                     try labelRepository.save(label)
                 }.value
-                guard let self else { return }
+                guard let self else { return false }
                 await self.loadOptions().value
                 if let transcriptionID {
                     await self.toggleLabel(label.id, for: transcriptionID).value
                 }
+                return true
             } catch {
                 self?.report(error, action: "create meeting label")
+                return false
             }
         }
     }
@@ -204,18 +233,92 @@ public final class MeetingClassificationViewModel {
     }
 
     @discardableResult
-    public func archiveMeetingLabel(_ id: UUID) -> Task<Void, Never> {
-        guard let labelRepository else { return Task {} }
+    public func updateMeetingLabel(
+        _ id: UUID,
+        with edit: MeetingLabelEdit
+    ) -> Task<Bool, Never> {
+        guard !isUpdatingLabels else { return Task { false } }
+        guard let labelRepository else {
+            errorMessage = "Label management is unavailable."
+            return Task { false }
+        }
+        isUpdatingLabels = true
+        errorMessage = nil
         return Task { @MainActor [weak self, labelRepository] in
+            defer { self?.isUpdatingLabels = false }
             do {
                 try await Task.detached(priority: .userInitiated) {
-                    try labelRepository.setArchived(id: id, isArchived: true)
+                    guard var label = try labelRepository.fetch(id: id) else {
+                        throw MeetingLabelManagementError.missingLabel
+                    }
+                    switch edit {
+                    case .rename(let name):
+                        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !normalizedName.isEmpty else {
+                            throw MeetingLabelManagementError.emptyName
+                        }
+                        let existing = try labelRepository.fetchAll(includeArchived: true)
+                        guard
+                            !existing.contains(where: {
+                                $0.id != id
+                                    && $0.name.compare(
+                                        normalizedName,
+                                        options: [.caseInsensitive, .diacriticInsensitive]
+                                    ) == .orderedSame
+                            })
+                        else {
+                            throw MeetingLabelManagementError.duplicateName(normalizedName)
+                        }
+                        label.name = normalizedName
+                    case .color(let colorToken):
+                        label.colorToken = colorToken
+                    }
+                    label.updatedAt = Date()
+                    try labelRepository.save(label)
                 }.value
-                guard let self else { return }
-                await self.loadOptions().value
+                guard let self else { return false }
+                await self.reloadLabelsAndClassifications()
+                return true
             } catch {
-                self?.report(error, action: "archive meeting label")
+                self?.report(error, action: "save label")
+                return false
             }
+        }
+    }
+
+    @discardableResult
+    public func setMeetingLabelArchived(_ id: UUID, isArchived: Bool) -> Task<Bool, Never> {
+        guard !isUpdatingLabels else { return Task { false } }
+        guard let labelRepository else {
+            errorMessage = "Label management is unavailable."
+            return Task { false }
+        }
+        isUpdatingLabels = true
+        errorMessage = nil
+        return Task { @MainActor [weak self, labelRepository] in
+            defer { self?.isUpdatingLabels = false }
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    guard try labelRepository.fetch(id: id) != nil else {
+                        throw MeetingLabelManagementError.missingLabel
+                    }
+                    try labelRepository.setArchived(id: id, isArchived: isArchived)
+                }.value
+                guard let self else { return false }
+                await self.reloadLabelsAndClassifications()
+                return true
+            } catch {
+                self?.report(error, action: isArchived ? "archive label" : "restore label")
+                return false
+            }
+        }
+    }
+
+    @discardableResult
+    public func archiveMeetingLabel(_ id: UUID) -> Task<Void, Never> {
+        let task = setMeetingLabelArchived(id, isArchived: true)
+        return Task {
+            _ = await task.value
         }
     }
 
@@ -366,11 +469,46 @@ public final class MeetingClassificationViewModel {
     private func finishMutations(for transcriptionID: UUID) {
         mutationTasks[transcriptionID] = nil
         updatingTranscriptionIDs.remove(transcriptionID)
+        guard pendingClassificationRefreshes.remove(transcriptionID) != nil else { return }
+        loadClassification(for: transcriptionID)
+    }
+
+    private func reloadLabelsAndClassifications() async {
+        await loadOptions().value
+        guard errorMessage == nil else { return }
+        let loadedIDs = Set(classifications.keys)
+        pendingClassificationRefreshes.formUnion(loadedIDs.filter { mutationTasks[$0] != nil })
+        let stableIDs = loadedIDs.filter { mutationTasks[$0] == nil }
+        for transcriptionID in stableIDs {
+            await loadClassification(for: transcriptionID).value
+        }
     }
 
     private func report(_ error: Error, action: String) {
         logger.error("Failed to \(action, privacy: .public): \(error.localizedDescription, privacy: .private)")
         errorMessage = "Unable to \(action): \(error.localizedDescription)"
+    }
+}
+
+public enum MeetingLabelEdit: Sendable {
+    case rename(String)
+    case color(String?)
+}
+
+private enum MeetingLabelManagementError: LocalizedError, Sendable {
+    case emptyName
+    case duplicateName(String)
+    case missingLabel
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyName:
+            return "A label name is required."
+        case .duplicateName(let name):
+            return "A label named '\(name)' already exists."
+        case .missingLabel:
+            return "This label no longer exists."
+        }
     }
 }
 

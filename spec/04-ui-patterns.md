@@ -209,10 +209,11 @@ queued-completion behavior.
 Label editing uses a compact popover anchored to the action that opened it from
 Library, the Meetings workspace, or any saved-transcription detail. Labels are
 shared by meetings, podcasts, videos, and local files. The popover floats above
-the current context without masking or resizing it and is never presented as a
-blocking sheet. It has a **Labels** heading, a focused full-width **Search or
-create a label** field, and a content-sized results region capped to the space
-available for the popover. Clicking outside or pressing Escape dismisses it.
+the current context without masking or resizing it. It has a **Labels** heading,
+a focused full-width **Search or create a label** field, and a content-sized
+results region capped to the space available for the popover. **Manage labels…**
+opens a separate sheet for shared-label maintenance. Clicking outside or pressing
+Escape dismisses the assignment popover.
 
 The source tabs — Meetings, Podcasts, Video, and Local — are the transcription
 types. The product does not add a second, user-defined "meeting type" taxonomy.
@@ -237,12 +238,14 @@ action. Pressing Return reuses an exact match or creates and immediately assigns
 labels truncate visually only after preserving their full tooltip and
 accessibility name.
 
-Every rendering of a label resolves its color from the same stored label ID:
-supported persisted tokens (`coral`/`orange`, `green`, `amber`/`yellow`, `red`,
-`purple`, and `blue`) take precedence; missing or unsupported tokens map
-deterministically from UUID bytes. Reordering, renaming, filtering, or restart
-does not change the color. This is display-only: no migration, stored-token
-rewrite, or color picker is implied.
+The management sheet searches active and archived labels and creates new ones.
+Each row can rename a label, choose **Automatic** or a compact stored palette (`coral`, `green`,
+`amber`, `red`, `purple`, `blue`), and archive or restore it. Automatic clears
+the stored token; missing or unsupported tokens map deterministically from UUID
+bytes. Archive hides a label from new choices while retaining existing
+assignments and label-targeted prompt rules. There is no hard-delete control.
+Every label surface resolves the same stored ID and palette token, so reordering,
+renaming, filtering, and restart do not change its color.
 
 Library's compact **Labels** / **Labels · N** filter trigger opens a searchable
 vertical option list with color dots, names, and selected checks. It states

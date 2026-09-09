@@ -163,6 +163,197 @@ final class MeetingClassificationViewModelTests: XCTestCase {
         XCTAssertEqual(service.updateCalls.last?.labelIDs, created.map { Set([$0.id]) })
     }
 
+    func testManagedLabelUpdateRefreshesOptionsAndLoadedClassifications() async throws {
+        let label = MeetingLabel(name: "Follow-up", colorToken: "coral")
+        var updated = label
+        updated.name = "Decision"
+        updated.colorToken = "purple"
+        let firstID = UUID()
+        let secondID = UUID()
+        let labelRepo = MeetingLabelRepositoryMock(items: [label])
+        let service = MeetingClassificationServiceMock()
+        service.values[firstID] = MeetingClassification(meetingType: nil, labels: [label])
+        service.values[secondID] = MeetingClassification(meetingType: nil, labels: [label])
+        let viewModel = MeetingClassificationViewModel()
+        viewModel.configure(
+            typeRepository: MeetingTypeRepositoryMock(items: []),
+            labelRepository: labelRepo,
+            service: service
+        )
+        await viewModel.loadOptions().value
+        await viewModel.loadClassification(for: firstID).value
+        await viewModel.loadClassification(for: secondID).value
+        service.onClassificationRead = { _, snapshot in
+            let current = labelRepo.items.first { $0.id == label.id } ?? label
+            return MeetingClassification(
+                meetingType: snapshot.meetingType,
+                labels: snapshot.labels.map { $0.id == label.id ? current : $0 }
+            )
+        }
+
+        let saved = await viewModel.updateMeetingLabel(label.id, with: .rename(updated.name)).value
+        let recolored = await viewModel.updateMeetingLabel(label.id, with: .color(updated.colorToken)).value
+        let automatic = await viewModel.updateMeetingLabel(label.id, with: .color(nil)).value
+        var automaticLabel = updated
+        automaticLabel.colorToken = nil
+
+        XCTAssertTrue(saved)
+        XCTAssertTrue(recolored)
+        XCTAssertTrue(automatic)
+        let stored = try XCTUnwrap(labelRepo.items.first)
+        XCTAssertEqual(stored.id, automaticLabel.id)
+        XCTAssertEqual(stored.name, automaticLabel.name)
+        XCTAssertNil(stored.colorToken)
+        XCTAssertEqual(viewModel.meetingLabels.first?.id, automaticLabel.id)
+        XCTAssertEqual(viewModel.meetingLabels.first?.name, automaticLabel.name)
+        XCTAssertNil(viewModel.meetingLabels.first?.colorToken)
+        XCTAssertEqual(viewModel.managedMeetingLabels.first?.id, automaticLabel.id)
+        XCTAssertEqual(viewModel.managedMeetingLabels.first?.name, automaticLabel.name)
+        XCTAssertNil(viewModel.managedMeetingLabels.first?.colorToken)
+        for transcriptionID in [firstID, secondID] {
+            let classification = viewModel.classification(for: transcriptionID)
+            XCTAssertEqual(classification?.labels.first?.id, automaticLabel.id)
+            XCTAssertEqual(classification?.labels.first?.name, automaticLabel.name)
+            XCTAssertNil(classification?.labels.first?.colorToken)
+        }
+    }
+
+    func testManagedLabelUpdateRefreshesClassificationAfterInFlightAssignmentFinishes() async throws {
+        let label = MeetingLabel(name: "Follow-up", colorToken: "coral")
+        let added = MeetingLabel(name: "Action")
+        let transcriptionID = UUID()
+        let labelRepo = MeetingLabelRepositoryMock(items: [label, added])
+        let service = MeetingClassificationServiceMock()
+        service.availableLabels = [label.id: label, added.id: added]
+        service.values[transcriptionID] = MeetingClassification(meetingType: nil, labels: [label])
+        let viewModel = MeetingClassificationViewModel()
+        viewModel.configure(
+            typeRepository: MeetingTypeRepositoryMock(items: []),
+            labelRepository: labelRepo,
+            service: service
+        )
+        await viewModel.loadOptions().value
+        await viewModel.loadClassification(for: transcriptionID).value
+
+        let staleReadGate = ClassificationReadGate()
+        let refreshedRead = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var isFirstRead = true
+        service.onClassificationRead = { _, snapshot in
+            lock.lock()
+            let firstRead = isFirstRead
+            isFirstRead = false
+            lock.unlock()
+
+            if firstRead {
+                return staleReadGate.blockFirstReadReturning(snapshot)
+            }
+
+            refreshedRead.signal()
+            let current = labelRepo.items.first { $0.id == label.id } ?? label
+            return MeetingClassification(
+                meetingType: snapshot.meetingType,
+                labels: snapshot.labels.map { $0.id == label.id ? current : $0 }
+            )
+        }
+
+        let assignment = viewModel.toggleLabel(added.id, for: transcriptionID)
+        let staleReadStarted = await Task.detached {
+            staleReadGate.waitUntilFirstReadStarted(timeout: .seconds(1))
+        }.value
+        guard staleReadStarted else {
+            staleReadGate.allowFirstReadToFinish()
+            XCTFail("The assignment did not begin its authoritative read.")
+            return
+        }
+        let saved = await viewModel.updateMeetingLabel(label.id, with: .rename("Decision")).value
+
+        XCTAssertTrue(saved)
+        staleReadGate.allowFirstReadToFinish()
+        await assignment.value
+        let deferredRefreshStarted = await Task.detached {
+            refreshedRead.wait(timeout: .now() + 1) == .success
+        }.value
+        guard deferredRefreshStarted else {
+            XCTFail("The completed assignment did not refresh the edited label.")
+            return
+        }
+
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(1)
+        while clock.now < deadline,
+            viewModel.classification(for: transcriptionID)?.labels.first(where: { $0.id == label.id })?.name
+                != "Decision"
+        {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(
+            viewModel.classification(for: transcriptionID)?.labels.first { $0.id == label.id }?.name,
+            "Decision"
+        )
+        XCTAssertEqual(
+            Set(viewModel.classification(for: transcriptionID)?.labels.map(\.id) ?? []),
+            [label.id, added.id]
+        )
+    }
+
+    func testArchivingLabelRetainsLoadedAssignmentAndRemovesItFromNewChoices() async {
+        let label = MeetingLabel(name: "Follow-up", colorToken: "coral")
+        var archived = label
+        archived.isArchived = true
+        let transcriptionID = UUID()
+        let labelRepo = MeetingLabelRepositoryMock(items: [label])
+        let service = MeetingClassificationServiceMock()
+        service.values[transcriptionID] = MeetingClassification(meetingType: nil, labels: [label])
+        let viewModel = MeetingClassificationViewModel()
+        viewModel.configure(
+            typeRepository: MeetingTypeRepositoryMock(items: []),
+            labelRepository: labelRepo,
+            service: service
+        )
+        await viewModel.loadOptions().value
+        await viewModel.loadClassification(for: transcriptionID).value
+        service.onClassificationRead = { _, snapshot in
+            MeetingClassification(
+                meetingType: snapshot.meetingType,
+                labels: snapshot.labels.map { $0.id == label.id ? archived : $0 }
+            )
+        }
+
+        let archivedSuccessfully = await viewModel.setMeetingLabelArchived(label.id, isArchived: true).value
+
+        XCTAssertTrue(archivedSuccessfully)
+        XCTAssertTrue(viewModel.meetingLabels.isEmpty)
+        XCTAssertEqual(viewModel.managedMeetingLabels, [archived])
+        XCTAssertEqual(viewModel.classification(for: transcriptionID)?.labels, [archived])
+    }
+
+    func testManagedLabelRenameRejectsDuplicateAndMissingLabelsWithoutWriting() async {
+        let first = MeetingLabel(name: "Follow-up")
+        let second = MeetingLabel(name: "Decision")
+        let labelRepo = MeetingLabelRepositoryMock(items: [first, second])
+        let viewModel = MeetingClassificationViewModel()
+        viewModel.configure(
+            typeRepository: MeetingTypeRepositoryMock(items: []),
+            labelRepository: labelRepo,
+            service: MeetingClassificationServiceMock()
+        )
+
+        let duplicateSaved = await viewModel.updateMeetingLabel(first.id, with: .rename("  decision  ")).value
+
+        XCTAssertFalse(duplicateSaved)
+        XCTAssertEqual(labelRepo.items, [first, second])
+        XCTAssertEqual(viewModel.errorMessage, "Unable to save label: A label named 'decision' already exists.")
+
+        labelRepo.items = []
+        let missingSaved = await viewModel.updateMeetingLabel(first.id, with: .color("purple")).value
+
+        XCTAssertFalse(missingSaved)
+        XCTAssertTrue(labelRepo.items.isEmpty)
+        XCTAssertEqual(viewModel.errorMessage, "Unable to save label: This label no longer exists.")
+    }
+
     func testEarlyLabelIntentsWaitForBaselineAndPreserveExistingTypeAndLabels() async {
         let customer = MeetingType(name: "Customer")
         let existing = MeetingLabel(name: "Existing")
@@ -420,7 +611,13 @@ private final class MeetingTypeRepositoryMock: MeetingTypeRepositoryProtocol, @u
 private final class MeetingLabelRepositoryMock: MeetingLabelRepositoryProtocol, @unchecked Sendable {
     var items: [MeetingLabel]
     init(items: [MeetingLabel]) { self.items = items }
-    func save(_ label: MeetingLabel) throws { items.append(label) }
+    func save(_ label: MeetingLabel) throws {
+        if let index = items.firstIndex(where: { $0.id == label.id }) {
+            items[index] = label
+        } else {
+            items.append(label)
+        }
+    }
     func fetch(id: UUID) throws -> MeetingLabel? { items.first { $0.id == id } }
     func fetchAll(includeArchived: Bool) throws -> [MeetingLabel] {
         includeArchived ? items : items.filter { !$0.isArchived }
@@ -516,6 +713,10 @@ private final class ClassificationReadGate: @unchecked Sendable {
 
     func waitUntilFirstReadStarted() {
         firstReadStarted.wait()
+    }
+
+    func waitUntilFirstReadStarted(timeout: DispatchTimeInterval) -> Bool {
+        firstReadStarted.wait(timeout: .now() + timeout) == .success
     }
 
     func allowFirstReadToFinish() {

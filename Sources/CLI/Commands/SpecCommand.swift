@@ -1251,6 +1251,23 @@ private extension CLISpecCommand {
             output: "MeetingLabel object."
         ),
         CLISpecCommand(
+            ["meetings", "labels", "set"],
+            summary: "Update a meeting label's name or color.",
+            readOnly: false,
+            arguments: [.argument("label", summary: "Label UUID, prefix, or exact name.")],
+            options: [
+                CLISpecParameter.option("--name", valueName: "NAME", summary: "New name."),
+                CLISpecParameter.option(
+                    "--color",
+                    valueName: "TOKEN",
+                    summary: "coral, green, amber, red, purple, or blue."
+                ),
+                CLISpecParameter.flag("--automatic-color", summary: "Clear the explicit color."),
+                databaseOption,
+            ],
+            output: "MeetingLabel object."
+        ),
+        CLISpecCommand(
             ["meetings", "labels", "archive"],
             summary: "Archive or restore a meeting label.",
             readOnly: false,
