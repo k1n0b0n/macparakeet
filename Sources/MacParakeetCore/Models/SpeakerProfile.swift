@@ -24,6 +24,11 @@ public struct SpeakerProfile: Codable, Identifiable, Sendable, Equatable {
     public var lastEvaluatedAt: Date?
     public var lastEvaluatedDistance: Double?
 
+    /// - Parameters:
+    ///   - displayName: unique case-insensitively; enrollment looks a profile
+    ///     up by this name before deciding to create one.
+    ///   - identity: the representation this profile's samples live in. Samples
+    ///     from another embedding model are never compared against it.
     public init(
         id: UUID = UUID(),
         displayName: String,
@@ -89,6 +94,11 @@ public struct SpeakerProfileExemplar: Codable, Identifiable, Sendable, Equatable
     public var sourceSpeakerId: String?
     public var createdAt: Date
 
+    /// - Parameters:
+    ///   - embedding: stored as bytes; its model identity is copied alongside
+    ///     so a later upgrade can tell which representation this sample is in.
+    ///   - sourceTranscriptionId: the recording it came from, cleared rather
+    ///     than cascaded when that recording is deleted.
     public init(
         id: UUID = UUID(),
         profileId: UUID,
@@ -159,6 +169,11 @@ public struct SpeakerProfileLink: Codable, Sendable, Equatable {
     public var createdAt: Date
     public var updatedAt: Date
 
+    /// - Parameters:
+    ///   - speakerId: the diarizer's positional id, meaningful only together
+    ///     with `transcriptFingerprint`.
+    ///   - distance: what the decision was based on, kept so calibration can
+    ///     read it back.
     public init(
         transcriptionId: UUID,
         speakerId: String,
