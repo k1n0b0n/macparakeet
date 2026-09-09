@@ -1,7 +1,7 @@
 # Persistent Speaker Profiles (Voiceprints) — Research Synthesis + Implementation Plan
 
 - **Date:** 2026-07-03 (amended 2026-09-09 — see
-  [Amendment](#amendment-2026-09-09-scope-locked-six-corrections))
+  [Amendment](#amendment-2026-09-09))
 - **Status:** READY TO IMPLEMENT. Phase 0: NO-GO on the July meeting corpus
   (pre-AEC echo contamination + only 3 usable sessions). Phase 0b (clean public
   corpus): **GO — embedding path validated** (no overlap: same-narrator
@@ -47,6 +47,11 @@ vectors as `BLOB` in the user DB · no auto-apply.
    anti-correlated with signal quality. Phase 0b stays valid because the harness
    normalizes both vectors first (`analyze_voiceprints.py:40-45`). **Fix:**
    normalize once in `SpeakerEmbedding.init?`, rejecting norms < 1e-6.
+   **Zero-vector clusters** (emitted when `computeCentroids` hits a zero denominator)
+   are dropped from the embedding dictionary only: the cluster keeps its segments,
+   its `SpeakerInfo` entry, its `idMapping` id and its duration total, so diarization
+   output is unchanged and the cluster is simply unmatchable and un-enrollable.
+   Fixture required.
 2. **No per-segment embedding exists in the offline pipeline.** Duration-weighted
    re-aggregation is a no-op, and FluidAudio's responsibility-weighted centroid
    already beats duration weighting. Nothing to build here.
@@ -91,13 +96,24 @@ us without wiring a second manager. Out of scope.
 3. **Decision journal replaces the corpus gate.** Log each decision locally
    (distances, gates, outcome, the label the user finally types); ~20 dogfooded
    meetings yield a labelled post-AEC corpus whose ground truth is what the user
-   wrote. Stays local, never in the support bundle; diagnostic embeddings are
-   ephemeral and never persisted as profiles.
+   wrote. Diagnostic embeddings are ephemeral and never persisted as profiles.
+   Lifecycle, since distances joined to labels are identifying:
+   - **Owner:** `SpeakerVoiceprintService`, the only writer. No other component
+     appends to it.
+   - **Location:** a table in the user database, not a loose file — so it inherits
+     the existing user-data deletion rules instead of needing its own.
+   - **Retention:** 90 days, pruned on write. It exists to calibrate, not to
+     accumulate; a rolling window is more than the ~20 meetings the calibration needs.
+   - **Never leaves the machine:** excluded from exports, diagnostics and support
+     bundles, like the profile tables.
+   - **Deletion:** rows are purged atomically with whatever they reference — deleting
+     a profile, a transcription, or all voice profiles takes its journal rows with it
+     in the same transaction. No orphan row outlives its subject.
 
 **Threshold:** start at `tau = 0.25`, not 0.30. The zero-FPR plateau runs
 0.25–0.45 and the worst positive is 0.227, so 0.25 still accepts 21/21 while
 buying margin against noisier post-AEC audio. A missed suggestion is a non-event;
-a false one is the worst documented outcome.
+a false one is the worst outcome this research documented.
 
 ## Verdict
 
@@ -191,11 +207,23 @@ accumulation). That's Phase 3, a separate opt-in, decided later.
   `top1 distance ≤ τ`, the margin holds on **both** sides (`top2 − top1 ≥ margin`
   for the cluster *and* for the profile), and each is the other's best match.
   Ship values: τ = 0.25, margin = 0.10.
+- **Singleton sides:** when a side has no second candidate (one enrolled profile, or
+  one detected cluster) the margin is **vacuously satisfied**, not failed — the
+  decision rests on τ alone. Failing it instead would make the feature unusable
+  exactly when it matters most: the first enrolled speaker would never be suggested.
+- **Ties:** if two candidates sit at an identical distance, the margin is 0 and the
+  pair is rejected. No tie-break by id, insertion order, or recency — an arbitrary
+  winner is precisely the "wrong automatic name" the invariant forbids. Both cases
+  need explicit fixtures (singleton profile set, singleton cluster set, exact tie).
 - Duration gates: embed only clean non-overlapped speech; per-speaker aggregate ≥3s
   usable, profile needs ≥15s total across ≥3 turns before it may suggest; never
   learn from <2s backchannels (snap those to the surrounding turn's label instead).
-- Profiles: K ≤ 10 raw reference embeddings + recomputed centroid; score = max over
-  references (preserves per-channel modes); samples added only on user confirmation
+- Profiles: K ≤ 10 raw reference embeddings, **no stored centroid** (Amendment).
+  Scoring is expressed in **cosine distance throughout**, so a profile scores as the
+  **minimum** distance over its exemplars — the same rule the July text stated as
+  "max over references" in similarity terms, restated in the shipping metric to
+  remove the contradiction. It preserves per-channel modes either way. A centroid may
+  be computed on the fly for display, never for scoring; samples added only on user confirmation
   (no silent EMA — poisoning/drift). **At most one sample per profile per
   recording** (the speaker-level aggregate): offline segment embeddings are
   cluster-derived from the same centroid, so storing several from one meeting
@@ -242,9 +270,23 @@ accumulation). That's Phase 3, a separate opt-in, decided later.
 - **Wiring**: the two insertion points above.
 - **Settings**: "Remember speakers" toggle (default off, requires speaker detection
   on) + profile list with per-profile delete + "Delete all voice profiles".
-- **Privacy invariants**: profiles excluded from exports, diagnostics, and support
-  bundles; deleting a profile never touches transcripts; profile store lives in the
-  user DB (covered by existing user-data deletion rules).
+- **Deletion semantics**: deleting a profile runs as **one transaction**. The
+  `ON DELETE CASCADE` on `speaker_profile_exemplars.profileId` and
+  `speaker_profile_links.profileId` removes every profile-owned row; transcriptions,
+  their `speaker_corrections`, and any label already applied are untouched. The
+  matching decision journal is purged for that profile in the same transaction.
+  Tested by asserting that no row in either table references the deleted id, and that
+  transcript labels survive. "Delete all voice profiles" is the same transaction over
+  every profile, not a loop that can half-fail.
+- **Export boundary**: `speaker_profiles`, `speaker_profile_exemplars`,
+  `speaker_profile_links` and the decision journal are excluded from **every** outward
+  surface — JSON/TXT/MD/SRT/VTT/PDF/DOCX exports, `ExportCommand.projectedJSON()`,
+  diagnostics, support bundles, and any future database export. This holds by
+  construction (no export path reads these tables, and nothing is added to
+  `Transcription`), and PR 7 adds contract tests that assert it per table rather than
+  relying on that construction staying true.
+- **Privacy invariants**: profile store lives in the user DB, covered by existing
+  user-data deletion rules.
 
 ## Privacy stance (privacy-biometrics report)
 
