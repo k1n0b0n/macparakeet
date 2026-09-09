@@ -3,7 +3,7 @@
 The reviewed fixes are merged in [PR #992](https://github.com/moona3k/macparakeet/pull/992)
 and final CI passed. The app is signed, notarized, stapled, and Gatekeeper accepted.
 **Distribution remains blocked on DMG notarization.** The original submission
-and a later clean-restart submission are both still `In Progress` after their
+and repeated clean-restart submissions are still `In Progress` after their
 respective bounded checks.
 No public release, appcast, Homebrew update, or download was published.
 
@@ -98,7 +98,7 @@ model. Local Greptile requires authentication; its absence is not a review pass.
   app; embedded app signature, staple and Gatekeeper checks pass; embedded CLI
   reports 4.0.0. The verification mount was detached.
 
-## Clean-restart notarization recovery
+## Notarization recovery attempts
 
 After the original DMG remained pending beyond the recovery boundary, a new
 candidate was built from remote main `4dda4b81ca5f786a13dc1135c74de254c30b1437`.
@@ -125,12 +125,36 @@ This is a documentation-only successor to the final-CI source tree above.
 
 Apple documents that the distributable disk image is the outermost container and
 supports stapling directly. A ZIP wrapper would not meet that requirement,
-because tickets cannot be stapled to ZIP archives. No further duplicate uploads
-were made. Resume only when Apple returns `Accepted` or `Invalid` for a fresh
-DMG submission; on acceptance, staple this exact DMG, validate the staple and
-Gatekeeper assessment, and record its post-staple hash. On `Invalid`, retrieve
-the notarization log before changing the artifact. Supporting receipts are under
-`/tmp/macparakeet-release-restart-*` on the review host.
+because tickets cannot be stapled to ZIP archives. Duplicate uploads were paused
+until the separate full restart below. On acceptance, staple the exact DMG,
+validate the staple and Gatekeeper assessment, and record its post-staple hash.
+On `Invalid`, retrieve the notarization log before changing the artifact.
+Supporting receipts are under `/tmp/macparakeet-release-restart-*` on the review
+host.
+
+### Second clean restart
+
+A full restart from remote main `89f098b1e8158d39a1e1c116a1d6aa6b6c98b26a`
+rebuilt the app and DMG without reusing a generated bundle. The code is unchanged;
+the source difference is this release-evidence document.
+
+- App **0.8.0**, build **20260909162325**, embedded CLI **4.0.0**.
+  The app archive SHA-256 is
+  `d8956461d959d0e4b768d7e7e20cc90f736504d8f4363d41884b0c4931a45086`.
+  Notarization **Accepted**: `c1555a9f-0c12-4de6-b8d0-79bc7463190d`;
+  stapler and Gatekeeper validation passed.
+- The newly signed DMG SHA-256 is
+  `3d255cb99febda928518b84375096a518de9cc470505e4df601520b82e233dc3`.
+  Signature, image checksum, mounted payload, Applications alias, and embedded
+  CLI checks passed.
+- The one fresh DMG submission, `7e8c33ca-2abb-4652-a66c-1f895a77f844`, again
+  failed locally with `Network.NWError 54` after its first multipart part and is
+  registered at Apple as `In Progress`. This reproduces the DMG-only transport
+  failure after a complete rebuild while app uploads continue to succeed.
+
+The release process is now stopped at this external transport boundary. Do not
+make more duplicate submissions from this host. A new notarization path or host
+must first demonstrate one completed DMG upload before this artifact is released.
 
 The older development app still has an **Edit Prompt** sheet open. It was not
 force-quit or replaced, and no editor contents were discarded. A normal local
