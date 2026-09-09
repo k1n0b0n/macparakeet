@@ -1,10 +1,10 @@
 # 0.8.0 final release review
 
 The reviewed fixes are merged in [PR #992](https://github.com/moona3k/macparakeet/pull/992)
-and final CI passed. The app is signed, notarized, stapled, and Gatekeeper accepted.
-**Distribution remains blocked on DMG notarization.** The original submission
-and repeated clean-restart submissions are still `In Progress` after their
-respective bounded checks.
+and final CI passed. The app and final DMG are signed, notarized, stapled, and
+Gatekeeper accepted. **The 0.8.0 distribution candidate is ready.** Earlier
+submissions remain `In Progress`, but the final clean submission below was
+accepted and is the only artifact eligible for distribution.
 No public release, appcast, Homebrew update, or download was published.
 
 ## Scope and source
@@ -152,10 +152,9 @@ the source difference is this release-evidence document.
   registered at Apple as `In Progress`. This reproduces the DMG-only transport
   failure after a complete rebuild while app uploads continue to succeed.
 
-The normal release process is stopped at this external transport boundary. Any
-further direct retry requires a user-directed recovery experiment; a new
-notarization path or host must demonstrate one completed DMG upload before this
-artifact is released.
+The normal release process was paused at this external transport boundary. The
+final clean submission below demonstrates a completed upload; the earlier pending
+IDs are not release artifacts and must not be stapled or published.
 
 ### Third clean retry
 
@@ -167,6 +166,27 @@ uploaded. Its submission `b3356473-1d7a-4837-b0e2-f1cb5bc72e79` remains
 `In Progress` after the normal five-minute window. No DMG was created from this
 attempt because app notarization did not complete. This demonstrates that the
 host transport failure is no longer DMG-specific.
+
+### Final clean submission
+
+A subsequent user-directed clean restart from remote main
+`1cc48e726ad457da013aee9ba4269625e3b66f67` completed both upload paths.
+
+- App **0.8.0**, build **20260909173236**, embedded CLI **4.0.0**. App archive
+  SHA-256: `028e4c4869a76133af4e550aff6a4dfa9cb158494d1a95c6a6fa7af79e49eab5`.
+  Notarization **Accepted**: `6f2178d3-8df2-453e-991f-d57d263e08ee`.
+  Stapler validation and Gatekeeper assessment passed.
+- DMG SHA-256 before stapling:
+  `db7fb0ff0583ed06612578fc5ef207f10c6363f91f0d3af4c0c267369dcce461`.
+  Notarization **Accepted**: `257e1484-7b77-47e7-851d-8b9fedbe4832`.
+  Final stapled DMG SHA-256:
+  `a82b5f5e1c64272766e09a1985b627aad41960c6eba3ac7b1b9359927b8da474`.
+- Final DMG stapler validation, disk-image checksum, signing, and Gatekeeper
+  assessment passed. A read-only mount contains the expected app, `/Applications`
+  alias, stapled app ticket, and embedded CLI 4.0.0.
+
+No public release, appcast, Homebrew update, or download was published during
+this review. Those publication actions remain separate from candidate readiness.
 
 The older development app still has an **Edit Prompt** sheet open. It was not
 force-quit or replaced, and no editor contents were discarded. A normal local
