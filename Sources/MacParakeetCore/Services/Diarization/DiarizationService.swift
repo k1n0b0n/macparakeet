@@ -14,6 +14,12 @@ public struct MacParakeetDiarizationResult: Sendable {
     /// exclusive, so these are plain sums.
     public let speechMsBySpeaker: [String: Int]
 
+    /// - Parameters:
+    ///   - speakerEmbeddings: keyed by the same stable ids as `speakers`, and
+    ///     empty when the diarizer produced none. Callers must treat a missing
+    ///     entry as "not matchable", never as an error.
+    ///   - speechMsBySpeaker: total speech per speaker id. Offline segments are
+    ///     exclusive, so these are plain sums.
     public init(
         segments: [SpeakerSegment],
         speakerCount: Int,

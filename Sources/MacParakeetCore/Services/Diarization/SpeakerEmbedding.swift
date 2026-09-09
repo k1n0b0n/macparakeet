@@ -26,6 +26,11 @@ public struct SpeakerModelIdentity: Sendable, Equatable, Hashable, Codable {
     /// comparable but less trustworthy, so callers tighten their threshold.
     public let aggregationProfileId: String
 
+    /// - Parameters:
+    ///   - embeddingModelId: the model that produced the vector.
+    ///   - aggregationProfileId: the clustering configuration that shaped the
+    ///     centroid, so a configuration change is visible even when the model
+    ///     is unchanged.
     public init(embeddingModelId: String, aggregationProfileId: String) {
         self.embeddingModelId = embeddingModelId
         self.aggregationProfileId = aggregationProfileId
