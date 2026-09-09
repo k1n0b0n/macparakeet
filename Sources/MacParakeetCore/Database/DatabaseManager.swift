@@ -1951,6 +1951,84 @@ public final class DatabaseManager: Sendable {
             }
         }
 
+        // v0.39 — Persistent speaker profiles (voiceprints). Enrolled voices
+        // live here so the same person can be recognized across recordings.
+        // Biometric data: every row is local-only, excluded from exports, and
+        // removable. See plans/active/2026-07-03-speaker-voiceprints.md.
+        migrator.registerMigration("v0.39-speaker-voiceprints") { db in
+            try db.execute(sql: """
+                CREATE TABLE speaker_profiles (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    displayName TEXT NOT NULL,
+                    embeddingModelId TEXT NOT NULL,
+                    aggregationProfileId TEXT NOT NULL,
+                    createdAt TEXT NOT NULL,
+                    updatedAt TEXT NOT NULL,
+                    lastMatchedAt TEXT,
+                    lastEvaluatedAt TEXT,
+                    lastEvaluatedDistance REAL
+                )
+                """)
+            // Renaming a second speaker to an enrolled name must add a sample
+            // to that profile, not create a rival profile with the same name.
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_speaker_profiles_name
+                ON speaker_profiles (displayName COLLATE NOCASE)
+                """)
+            try db.execute(sql: """
+                CREATE TABLE speaker_profile_exemplars (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    profileId TEXT NOT NULL
+                        REFERENCES speaker_profiles(id) ON DELETE CASCADE,
+                    vector BLOB NOT NULL CHECK (length(vector) = 1024),
+                    speechSeconds REAL NOT NULL CHECK (speechSeconds > 0),
+                    captureDomain TEXT NOT NULL CHECK (
+                        captureDomain IN ('system', 'microphone', 'file')
+                    ),
+                    origin TEXT NOT NULL CHECK (
+                        origin IN ('manualEnrollment', 'confirmedSuggestion')
+                    ),
+                    embeddingModelId TEXT NOT NULL,
+                    aggregationProfileId TEXT NOT NULL,
+                    sourceTranscriptionId TEXT
+                        REFERENCES transcriptions(id) ON DELETE SET NULL,
+                    sourceSpeakerId TEXT,
+                    createdAt TEXT NOT NULL,
+                    UNIQUE (profileId, sourceTranscriptionId)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_speaker_profile_exemplars_profile
+                ON speaker_profile_exemplars (profileId, createdAt)
+                """)
+            // Suggestion decisions, scoped by fingerprint like
+            // speaker_corrections: once a transcript is re-diarized the old
+            // rows no longer apply, so a stale dismissal cannot permanently
+            // suppress a legitimate suggestion.
+            try db.execute(sql: """
+                CREATE TABLE speaker_profile_links (
+                    transcriptionId TEXT NOT NULL
+                        REFERENCES transcriptions(id) ON DELETE CASCADE,
+                    speakerId TEXT NOT NULL,
+                    transcriptFingerprint TEXT NOT NULL,
+                    profileId TEXT NOT NULL
+                        REFERENCES speaker_profiles(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('suggested', 'confirmed', 'dismissed')
+                    ),
+                    distance REAL NOT NULL,
+                    runnerUpDistance REAL,
+                    createdAt TEXT NOT NULL,
+                    updatedAt TEXT NOT NULL,
+                    PRIMARY KEY (transcriptionId, speakerId, transcriptFingerprint)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_speaker_profile_links_profile
+                ON speaker_profile_links (profileId)
+                """)
+        }
+
         return migrator
     }
 
