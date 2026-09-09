@@ -2,8 +2,9 @@
 
 The reviewed fixes are merged in [PR #992](https://github.com/moona3k/macparakeet/pull/992)
 and final CI passed. The app is signed, notarized, stapled, and Gatekeeper accepted.
-**Distribution remains blocked on the DMG notarization submission**, still
-`In Progress` after the bounded 30-minute check and a final check at 09:52 UTC.
+**Distribution remains blocked on DMG notarization.** The original submission
+and a later clean-restart submission are both still `In Progress` after their
+respective bounded checks.
 No public release, appcast, Homebrew update, or download was published.
 
 ## Scope and source
@@ -97,20 +98,39 @@ model. Local Greptile requires authentication; its absence is not a review pass.
   app; embedded app signature, staple and Gatekeeper checks pass; embedded CLI
   reports 4.0.0. The verification mount was detached.
 
-The app upload used `notarytool submit --no-s3-acceleration --no-progress` and
-completed successfully. The same flags did not establish a successful DMG upload.
-An ID proves registration, not completed upload: Apple's
-[notarization API](https://developer.apple.com/documentation/notaryapi/submitting-software-for-notarization-over-the-web)
-registers the submission before the S3 transfer. `info`/`history` do not expose a
-separate upload-complete state. The [status feed](https://developer.apple.com/system-status/)
-listed no Notary Service incident; this does not explain this submission.
+## Clean-restart notarization recovery
 
-Resume by checking the **same DMG ID**. After it is Accepted, staple that DMG,
-validate the staple and Gatekeeper assessment, and record its final hash. If
-Invalid/Rejected, retrieve its notarization log before changing or resubmitting
-anything. Do not rerun the full signing script merely because processing is slow.
-The host's `dist/release-candidate.json` records artifact identities and pending
-status; supporting receipts are `/tmp/macparakeet-release-final-*`.
+After the original DMG remained pending beyond the recovery boundary, a new
+candidate was built from remote main `4dda4b81ca5f786a13dc1135c74de254c30b1437`.
+This is a documentation-only successor to the final-CI source tree above.
+
+- App **0.8.0**, build **20260909155335**, embedded CLI **4.0.0**; the app/dSYM
+  UUID remains `9BC5DB51-D9E0-306D-9CEC-ACEE8200A1B9`.
+- New app archive SHA-256:
+  `b0a24fde6173814c2bdc26c1ce754d98f6f134f39dd35cb424d8ee693b7330a6`.
+  App notarization **Accepted**: `0eab1692-8471-4717-a65a-5e700123f5ac`.
+  Stapler validation and Gatekeeper assessment passed.
+- New signed DMG SHA-256 before any staple:
+  `2491acfcfa7af6515c993fae99484d7952b9ff21f3ef2fdcce728057074fa117`.
+  Signature and `hdiutil verify` passed; the read-only mounted payload contains
+  the expected stapled app, `/Applications` alias, and CLI 4.0.0.
+- The direct upload ended with `Network.NWError 54` (connection reset by peer)
+  after multipart transfer. Its registered submission
+  `00fa77f5-1181-405e-8a2f-cb4e61a45dbc` remains `In Progress`.
+  Two alternate client-path submissions were also registered as
+  `e2a27ceb-ce3e-4900-85aa-eaac5eacc7f2` and
+  `661f89e5-1064-43e8-9428-15be377e1ce0`; both remain `In Progress`.
+  The accelerated paths crashed locally with `SIGBUS` in Xcode 26.4.1
+  `notarytool` networking code. No proxy was configured.
+
+Apple documents that the distributable disk image is the outermost container and
+supports stapling directly. A ZIP wrapper would not meet that requirement,
+because tickets cannot be stapled to ZIP archives. No further duplicate uploads
+were made. Resume only when Apple returns `Accepted` or `Invalid` for a fresh
+DMG submission; on acceptance, staple this exact DMG, validate the staple and
+Gatekeeper assessment, and record its post-staple hash. On `Invalid`, retrieve
+the notarization log before changing the artifact. Supporting receipts are under
+`/tmp/macparakeet-release-restart-*` on the review host.
 
 The older development app still has an **Edit Prompt** sheet open. It was not
 force-quit or replaced, and no editor contents were discarded. A normal local
