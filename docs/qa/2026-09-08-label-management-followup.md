@@ -4,7 +4,7 @@
 
 - Creating a label with existing assigned labels leaves excessive vertical space in the editor.
 - Existing labels cannot be renamed or recolored in the app.
-- A Result badge is redundant in a list that contains only transcript prompts.
+- The Result badge is redundant, including in All prompts.
 - Dictation history shows an expand chevron for text that already fits; expansion must follow actual truncation, including after resizing.
 
 ## Accepted direction
@@ -17,7 +17,7 @@ Present management from a stable parent view, so dismissing its launching popove
 
 Keep the existing CLI rename and archive commands compatible; add explicit metadata editing and color reset for agent parity, with documented JSON behavior and validation.
 
-Show prompt type badges only when the displayed list contains different prompt types. Preserve type metadata and filtering behavior.
+Do not show a Result badge. In mixed lists, mark Transform rows to distinguish them from the default transcript prompts. Preserve type metadata and filtering behavior.
 
 ## Verification targets
 
@@ -26,7 +26,7 @@ Show prompt type badges only when the displayed list contains different prompt t
 - Rename and color updates preserve identity and assignments across recordings.
 - Blank/duplicate names and failed writes remain visible without false success.
 - Archive/restore and Automatic color work from management and the CLI.
-- Type badges disappear in single-type lists and remain useful in mixed lists.
+- Result badges are absent from all active lists; Transform badges distinguish Transform rows in mixed lists.
 - Dictation expansion appears only when the three-line preview hides text; expanded rows retain a collapse action.
 - Native popover tests run reliably; investigate the observed signal-11 crashes before treating CI as green.
 
