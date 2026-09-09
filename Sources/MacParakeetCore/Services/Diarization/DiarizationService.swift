@@ -1,3 +1,4 @@
+import CryptoKit
 import FluidAudio
 import Foundation
 
@@ -5,11 +6,26 @@ public struct MacParakeetDiarizationResult: Sendable {
     public let segments: [SpeakerSegment]
     public let speakerCount: Int
     public let speakers: [SpeakerInfo]
+    /// Voice embedding per detected speaker, keyed by the same stable ids as
+    /// `speakers`. A speaker is absent when its centroid carried no usable
+    /// direction; it keeps its segments and its `SpeakerInfo` either way.
+    public let speakerEmbeddings: [String: SpeakerEmbedding]
+    /// Total speech per speaker id, in milliseconds. Offline segments are
+    /// exclusive, so these are plain sums.
+    public let speechMsBySpeaker: [String: Int]
 
-    public init(segments: [SpeakerSegment], speakerCount: Int, speakers: [SpeakerInfo]) {
+    public init(
+        segments: [SpeakerSegment],
+        speakerCount: Int,
+        speakers: [SpeakerInfo],
+        speakerEmbeddings: [String: SpeakerEmbedding] = [:],
+        speechMsBySpeaker: [String: Int] = [:]
+    ) {
         self.segments = segments
         self.speakerCount = speakerCount
         self.speakers = speakers
+        self.speakerEmbeddings = speakerEmbeddings
+        self.speechMsBySpeaker = speechMsBySpeaker
     }
 }
 
@@ -151,6 +167,7 @@ public actor DiarizationService: DiarizationServiceProtocol {
     private let modelsDirectory: URL
     private let inferenceGate: ANEInferenceGate
     private let explicitConstraint: SpeakerDiarizationConstraint?
+    private let modelIdentity: SpeakerModelIdentity
     private var managerFactory: ManagerFactory?
     private var preparation: Task<Void, Error>?
 
@@ -163,7 +180,8 @@ public actor DiarizationService: DiarizationServiceProtocol {
         self.init(
             loadManagerFactory: Self.modelLoader(config: config),
             modelsDirectory: modelsDirectory ?? AppPaths.fluidAudioModelsDirURL,
-            explicitConstraint: nil
+            explicitConstraint: nil,
+            modelIdentity: Self.modelIdentity(for: config)
         )
     }
 
@@ -174,7 +192,8 @@ public actor DiarizationService: DiarizationServiceProtocol {
         self.init(
             loadManagerFactory: Self.modelLoader(config: Self.highAccuracyConfig),
             modelsDirectory: modelsDirectory ?? AppPaths.fluidAudioModelsDirURL,
-            explicitConstraint: speakerConstraint
+            explicitConstraint: speakerConstraint,
+            modelIdentity: Self.modelIdentity(for: Self.highAccuracyConfig)
         )
     }
 
@@ -182,12 +201,14 @@ public actor DiarizationService: DiarizationServiceProtocol {
         loadManagerFactory: @escaping ManagerFactoryLoader,
         modelsDirectory: URL,
         explicitConstraint: SpeakerDiarizationConstraint? = nil,
-        inferenceGate: ANEInferenceGate = .shared
+        inferenceGate: ANEInferenceGate = .shared,
+        modelIdentity: SpeakerModelIdentity = DiarizationService.defaultModelIdentity
     ) {
         self.loadManagerFactory = loadManagerFactory
         self.modelsDirectory = modelsDirectory.standardizedFileURL
         self.explicitConstraint = explicitConstraint
         self.inferenceGate = inferenceGate
+        self.modelIdentity = modelIdentity
     }
 
     public func diarize(
@@ -247,11 +268,49 @@ public actor DiarizationService: DiarizationServiceProtocol {
                 return SpeakerInfo(id: stableId, label: "Speaker \(number)")
             }
 
+        var speechMsBySpeaker: [String: Int] = [:]
+        for segment in segments {
+            speechMsBySpeaker[segment.speakerId, default: 0] += max(0, segment.endMs - segment.startMs)
+        }
+
         return MacParakeetDiarizationResult(
             segments: segments,
             speakerCount: speakers.count,
-            speakers: speakers
+            speakers: speakers,
+            speakerEmbeddings: Self.speakerEmbeddings(
+                from: fluidResult.speakerDatabase,
+                idMapping: idMapping,
+                identity: modelIdentity
+            ),
+            speechMsBySpeaker: speechMsBySpeaker
         )
+    }
+
+    /// Rekeys FluidAudio's speaker database onto our stable ids and normalizes
+    /// each centroid.
+    ///
+    /// The remap is not cosmetic: FluidAudio also names its clusters `S1`, `S2`,
+    /// but numbered by cluster index, while ours are numbered by who speaks
+    /// first. Carrying the keys over untouched would silently attach one
+    /// speaker's voice to another's label.
+    ///
+    /// Speakers whose centroid fails validation are dropped from the dictionary
+    /// only. They keep their segments, their `SpeakerInfo` and their duration —
+    /// diarization output is unchanged, and they are merely unmatchable.
+    static func speakerEmbeddings(
+        from speakerDatabase: [String: [Float]]?,
+        idMapping: [String: String],
+        identity: SpeakerModelIdentity
+    ) -> [String: SpeakerEmbedding] {
+        guard let speakerDatabase else { return [:] }
+
+        var embeddings: [String: SpeakerEmbedding] = [:]
+        for (fluidID, rawVector) in speakerDatabase {
+            guard let stableID = idMapping[fluidID] else { continue }
+            guard let embedding = SpeakerEmbedding(rawVector: rawVector, identity: identity) else { continue }
+            embeddings[stableID] = embedding
+        }
+        return embeddings
     }
 
     public func prepareModels(onProgress: (@Sendable (String) -> Void)? = nil) async throws {
@@ -394,6 +453,49 @@ public actor DiarizationService: DiarizationServiceProtocol {
         // the surrounding speaker).
         config.zeroVoteReembed = OfflineDiarizerConfig.ZeroVoteReembed(enabled: true)
         return config
+    }
+
+    /// The WeSpeaker embedding model behind FluidAudio's offline diarizer.
+    /// Change it only when the model itself changes: vectors from two different
+    /// models share no space and are never compared.
+    public nonisolated static let embeddingModelId = "fluidaudio-wespeaker-256"
+
+    /// Bump on any FluidAudio upgrade that could move the clustering centroid,
+    /// even when the embedding model is untouched.
+    private nonisolated static let pipelineRevision = "fluidaudio-0.15.6"
+
+    /// Identity of the representation `config` produces.
+    ///
+    /// The centroid depends on the clustering configuration as much as on the
+    /// model, so the aggregation half hashes every setting that can move it.
+    /// The per-run speaker-count constraint is deliberately excluded: it varies
+    /// call to call, and folding it in would make a profile enrolled under a
+    /// count hint incomparable with the same voice heard without one.
+    /// Identity of the representation the shipping configuration produces.
+    nonisolated static var defaultModelIdentity: SpeakerModelIdentity {
+        modelIdentity(for: highAccuracyConfig)
+    }
+
+    nonisolated static func modelIdentity(for config: OfflineDiarizerConfig) -> SpeakerModelIdentity {
+        let canonical = [
+            "pipeline=\(pipelineRevision)",
+            "windowDuration=\(config.segmentation.windowDurationSeconds)",
+            "stepRatio=\(config.segmentation.stepRatio)",
+            "minSegmentDuration=\(config.embedding.minSegmentDurationSeconds)",
+            "excludeOverlap=\(config.embedding.excludeOverlap)",
+            "clusteringThreshold=\(config.clustering.threshold)",
+            "constrainedAssignment=\(config.clustering.constrainedAssignment)",
+            "warmStartFa=\(config.clustering.warmStartFa)",
+            "warmStartFb=\(config.clustering.warmStartFb)",
+            "zeroVoteReembed=\(config.zeroVoteReembed.enabled)",
+            "zeroVoteMinDuration=\(config.zeroVoteReembed.minDurationSeconds)",
+        ].joined(separator: ";")
+
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        return SpeakerModelIdentity(
+            embeddingModelId: embeddingModelId,
+            aggregationProfileId: digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        )
     }
 
     nonisolated static func offlineConfig(
