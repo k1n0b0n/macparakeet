@@ -152,9 +152,21 @@ the source difference is this release-evidence document.
   registered at Apple as `In Progress`. This reproduces the DMG-only transport
   failure after a complete rebuild while app uploads continue to succeed.
 
-The release process is now stopped at this external transport boundary. Do not
-make more duplicate submissions from this host. A new notarization path or host
-must first demonstrate one completed DMG upload before this artifact is released.
+The normal release process is stopped at this external transport boundary. Any
+further direct retry requires a user-directed recovery experiment; a new
+notarization path or host must demonstrate one completed DMG upload before this
+artifact is released.
+
+### Third clean retry
+
+At the user's direction, a third clean rebuild was attempted from remote main
+`a9a22f8996ce801b68b074965728bff949d2e0c1`. The new app archive
+`04f936b36863ec3e229050941fb12f7334edb3480d987436347e55cf301db6b4`
+encountered the same `Network.NWError 54` after all 20 multipart parts were
+uploaded. Its submission `b3356473-1d7a-4837-b0e2-f1cb5bc72e79` remains
+`In Progress` after the normal five-minute window. No DMG was created from this
+attempt because app notarization did not complete. This demonstrates that the
+host transport failure is no longer DMG-specific.
 
 The older development app still has an **Edit Prompt** sheet open. It was not
 force-quit or replaced, and no editor contents were discarded. A normal local
