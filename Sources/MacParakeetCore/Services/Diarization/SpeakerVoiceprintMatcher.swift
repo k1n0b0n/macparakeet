@@ -8,6 +8,8 @@ public struct SpeakerClusterObservation: Sendable, Equatable {
     public let speechSeconds: Double
     public let captureDomain: SpeakerCaptureDomain
 
+    /// - Parameter speechSeconds: total clean speech for this cluster; the
+    ///   duration gates read it, and a short cluster is never scored.
     public init(
         speakerId: String,
         embedding: SpeakerEmbedding,
@@ -23,10 +25,14 @@ public struct SpeakerClusterObservation: Sendable, Equatable {
 
 /// An enrolled voice, reduced to what scoring needs.
 public struct SpeakerProfileCandidate: Sendable, Equatable {
+    /// One stored sample of the voice, with the domain it was captured in.
     public struct Reference: Sendable, Equatable {
         public let embedding: SpeakerEmbedding
         public let captureDomain: SpeakerCaptureDomain
 
+        /// - Parameter captureDomain: preferred when two references are
+        ///   equally close, since the same voice sits elsewhere in the space
+        ///   over a compressed stream than over a local microphone.
         public init(embedding: SpeakerEmbedding, captureDomain: SpeakerCaptureDomain) {
             self.embedding = embedding
             self.captureDomain = captureDomain
@@ -37,6 +43,8 @@ public struct SpeakerProfileCandidate: Sendable, Equatable {
     public let displayName: String
     public let references: [Reference]
 
+    /// - Parameter references: scored as a set, closest wins; a profile with
+    ///   none is skipped rather than treated as distant.
     public init(profileId: UUID, displayName: String, references: [Reference]) {
         self.profileId = profileId
         self.displayName = displayName
@@ -63,6 +71,7 @@ public struct SpeakerMatchPolicy: Sendable, Equatable {
     /// rather than merged into the existing profile.
     public let pollutionGuardDistance: Double
 
+    /// Use ``v1`` unless a test or a calibration run needs its own values.
     public init(
         tau: Double,
         margin: Double,
@@ -109,6 +118,8 @@ public struct SpeakerVoiceprintSuggestion: Sendable, Equatable {
     /// decision had to beat. `nil` when there was no second candidate at all.
     public let runnerUpDistance: Double?
 
+    /// - Parameter runnerUpDistance: what this decision had to beat, or `nil`
+    ///   when there was no second candidate on either side.
     public init(
         speakerId: String,
         profileId: UUID,
