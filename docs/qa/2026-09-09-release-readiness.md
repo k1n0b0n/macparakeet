@@ -184,6 +184,10 @@ A subsequent user-directed clean restart from remote main
 - Final DMG stapler validation, disk-image checksum, signing, and Gatekeeper
   assessment passed. A read-only mount contains the expected app, `/Applications`
   alias, stapled app ticket, and embedded CLI 4.0.0.
+- The optional Finder layout script returned `-1728` while addressing the
+  temporary mounted volume. This does not affect the signed payload or
+  drag-to-Applications flow, but the custom icon positions were not visually
+  verified. Treat this as a publication-time visual QA item.
 
 No public release, appcast, Homebrew update, or download was published during
 this review. Those publication actions remain separate from candidate readiness.
