@@ -146,10 +146,11 @@ public enum SpeakerVoiceprintMatcher {
         let scorable = clusters.filter { $0.speechSeconds >= policy.minSpeechSecondsToMatch }
         guard !scorable.isEmpty, !profiles.isEmpty else { return [] }
 
-        // distances[clusterIndex][profileIndex], nil when incomparable.
-        let distances: [[Double?]] = scorable.map { cluster in
-            profiles.map { profile in distance(from: cluster, to: profile, policy: policy) }
+        // matches[clusterIndex][profileIndex], nil when incomparable.
+        let matches: [[ReferenceMatch?]] = scorable.map { cluster in
+            profiles.map { profile in bestReference(from: cluster, to: profile, policy: policy) }
         }
+        let distances: [[Double?]] = matches.map { $0.map(\.?.distance) }
 
         var suggestions: [SpeakerVoiceprintSuggestion] = []
         for (clusterIndex, cluster) in scorable.enumerated() {
@@ -164,7 +165,9 @@ public enum SpeakerVoiceprintMatcher {
             }
 
             let profile = profiles[best.index]
-            guard best.distance <= effectiveTau(cluster: cluster, profile: profile, policy: policy) else { continue }
+            guard let winning = matches[clusterIndex][best.index],
+                  best.distance <= effectiveTau(for: winning, policy: policy)
+            else { continue }
 
             // A side with no second candidate has nothing to be separated
             // from, so its margin is vacuously satisfied. Failing it instead
@@ -186,6 +189,18 @@ public enum SpeakerVoiceprintMatcher {
         return suggestions
     }
 
+    /// The closest reference of a profile, and whether it was aggregated the
+    /// same way as the cluster.
+    public struct ReferenceMatch: Sendable, Equatable {
+        public let distance: Double
+        /// Whether the *winning* reference shares the cluster's aggregation
+        /// profile. Carried alongside the distance rather than derived later,
+        /// because the two must describe the same reference: a profile holding
+        /// both pre- and post-upgrade exemplars would otherwise be scored on an
+        /// old reference while being trusted as if it were current.
+        public let sameAggregation: Bool
+    }
+
     /// Distance from a cluster to a profile: the closest reference, preferring
     /// one captured in the same domain when two are equally close. `nil` when
     /// no reference is comparable at all.
@@ -194,39 +209,44 @@ public enum SpeakerVoiceprintMatcher {
         to profile: SpeakerProfileCandidate,
         policy: SpeakerMatchPolicy
     ) -> Double? {
-        var best: (distance: Double, sameDomain: Bool)?
+        bestReference(from: cluster, to: profile, policy: policy)?.distance
+    }
+
+    /// As `distance`, keeping the winning reference's aggregation identity.
+    public static func bestReference(
+        from cluster: SpeakerClusterObservation,
+        to profile: SpeakerProfileCandidate,
+        policy: SpeakerMatchPolicy
+    ) -> ReferenceMatch? {
+        var best: (distance: Double, sameDomain: Bool, sameAggregation: Bool)?
 
         for reference in profile.references.prefix(policy.maxReferencesPerProfile) {
             guard let distance = cluster.embedding.cosineDistance(to: reference.embedding) else { continue }
             let sameDomain = reference.captureDomain == cluster.captureDomain
+            let sameAggregation = reference.embedding.identity.aggregationProfileId
+                == cluster.embedding.identity.aggregationProfileId
 
             guard let current = best else {
-                best = (distance, sameDomain)
+                best = (distance, sameDomain, sameAggregation)
                 continue
             }
             if distance < current.distance {
-                best = (distance, sameDomain)
+                best = (distance, sameDomain, sameAggregation)
             } else if distance == current.distance, sameDomain, !current.sameDomain {
-                best = (distance, sameDomain)
+                best = (distance, sameDomain, sameAggregation)
             }
         }
 
-        return best?.distance
+        guard let best else { return nil }
+        return ReferenceMatch(distance: best.distance, sameAggregation: best.sameAggregation)
     }
 
-    /// The threshold for this pair. A reference aggregated under a different
+    /// The threshold for one pair. A reference aggregated under a different
     /// clustering configuration is still comparable — Phase 0b leaves a 0.24
     /// gap between the worst true pair and the best impostor, and configuration
     /// drift costs hundredths — but it is trusted less.
-    private static func effectiveTau(
-        cluster: SpeakerClusterObservation,
-        profile: SpeakerProfileCandidate,
-        policy: SpeakerMatchPolicy
-    ) -> Double {
-        let sameAggregation = profile.references.contains {
-            $0.embedding.identity.aggregationProfileId == cluster.embedding.identity.aggregationProfileId
-        }
-        return sameAggregation ? policy.tau : policy.tau - policy.crossAggregationPenalty
+    private static func effectiveTau(for match: ReferenceMatch, policy: SpeakerMatchPolicy) -> Double {
+        match.sameAggregation ? policy.tau : policy.tau - policy.crossAggregationPenalty
     }
 
     private struct Candidate {

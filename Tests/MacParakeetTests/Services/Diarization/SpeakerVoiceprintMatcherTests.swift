@@ -238,6 +238,43 @@ final class SpeakerVoiceprintMatcherTests: XCTestCase {
         )
     }
 
+    /// A profile that straddles a FluidAudio upgrade holds one exemplar from
+    /// each aggregation. The penalty must follow the reference that actually
+    /// won, otherwise the presence of a current exemplar would buy full trust
+    /// for a decision an older one made.
+    func testThePenaltyFollowsTheWinningReferenceNotTheProfile() {
+        let old = SpeakerModelIdentity(
+            embeddingModelId: Self.identity.embeddingModelId,
+            aggregationProfileId: "pre-upgrade"
+        )
+        let borderline = 38.5  // 0.217: clears tau, not tau minus the penalty.
+
+        let straddling = SpeakerProfileCandidate(
+            profileId: UUID(),
+            displayName: "Sarah",
+            references: [
+                // Closest, but from the old aggregation.
+                reference(voice: 0, degrees: 0, identity: old),
+                // Current aggregation, but far away.
+                reference(voice: 7, degrees: 0),
+            ]
+        )
+
+        let suggestions = SpeakerVoiceprintMatcher.match(
+            clusters: [cluster("S1", voice: 0, degrees: borderline)],
+            profiles: [straddling],
+            policy: policy
+        )
+        XCTAssertTrue(suggestions.isEmpty)
+
+        let winning = SpeakerVoiceprintMatcher.bestReference(
+            from: cluster("S1", voice: 0, degrees: borderline),
+            to: straddling,
+            policy: policy
+        )
+        XCTAssertFalse(try XCTUnwrap(winning).sameAggregation)
+    }
+
     // MARK: Scoring across references
 
     func testProfileDistanceIsTheClosestReferenceNotTheAverage() {
