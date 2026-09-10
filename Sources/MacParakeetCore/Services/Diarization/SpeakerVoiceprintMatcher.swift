@@ -2,14 +2,12 @@ import Foundation
 
 /// One detected speaker in one recording, as offered to the matcher.
 public struct SpeakerClusterObservation: Sendable, Equatable {
-    /// The diarizer's id for this run ("S1", "system:S1"). Positional.
+    /// Positional id for this run ("S1", "system:S1").
     public let speakerId: String
     public let embedding: SpeakerEmbedding
     public let speechSeconds: Double
     public let captureDomain: SpeakerCaptureDomain
 
-    /// - Parameter speechSeconds: total clean speech for this cluster; the
-    ///   duration gates read it, and a short cluster is never scored.
     public init(
         speakerId: String,
         embedding: SpeakerEmbedding,
@@ -25,14 +23,10 @@ public struct SpeakerClusterObservation: Sendable, Equatable {
 
 /// An enrolled voice, reduced to what scoring needs.
 public struct SpeakerProfileCandidate: Sendable, Equatable {
-    /// One stored sample of the voice, with the domain it was captured in.
     public struct Reference: Sendable, Equatable {
         public let embedding: SpeakerEmbedding
         public let captureDomain: SpeakerCaptureDomain
 
-        /// - Parameter captureDomain: preferred when two references are
-        ///   equally close, since the same voice sits elsewhere in the space
-        ///   over a compressed stream than over a local microphone.
         public init(embedding: SpeakerEmbedding, captureDomain: SpeakerCaptureDomain) {
             self.embedding = embedding
             self.captureDomain = captureDomain
@@ -43,8 +37,6 @@ public struct SpeakerProfileCandidate: Sendable, Equatable {
     public let displayName: String
     public let references: [Reference]
 
-    /// - Parameter references: scored as a set, closest wins; a profile with
-    ///   none is skipped rather than treated as distant.
     public init(profileId: UUID, displayName: String, references: [Reference]) {
         self.profileId = profileId
         self.displayName = displayName
@@ -52,26 +44,21 @@ public struct SpeakerProfileCandidate: Sendable, Equatable {
     }
 }
 
-/// Thresholds and gates. Injected rather than hard-coded so calibration changes
-/// one value and nothing else, and so tests state their own.
+/// Thresholds and gates, injected so calibration changes values and no logic.
 public struct SpeakerMatchPolicy: Sendable, Equatable {
     /// Accept only below this cosine distance.
     public let tau: Double
     /// Required separation from the runner-up, on both sides.
     public let margin: Double
-    /// A cluster below this much speech is never scored.
     public let minSpeechSecondsToMatch: Double
-    /// A cluster below this much speech may match but never enroll.
+    /// A cluster above the match gate but below this may match, never enroll.
     public let minSpeechSecondsToEnroll: Double
     public let maxReferencesPerProfile: Int
-    /// Tightening applied when the reference was aggregated under a different
-    /// clustering configuration.
+    /// Tightening when the reference came from another clustering config.
     public let crossAggregationPenalty: Double
-    /// Above this, a name-based enrollment is treated as a different person
-    /// rather than merged into the existing profile.
+    /// Above this, a name-based enrollment is a different person, not a merge.
     public let pollutionGuardDistance: Double
 
-    /// Use ``v1`` unless a test or a calibration run needs its own values.
     public init(
         tau: Double,
         margin: Double,
@@ -90,13 +77,9 @@ public struct SpeakerMatchPolicy: Sendable, Equatable {
         self.pollutionGuardDistance = pollutionGuardDistance
     }
 
-    /// Shipping values.
-    ///
-    /// `tau` sits at the bottom of the zero-false-positive plateau measured in
-    /// the Phase 0b calibration (0.25 to 0.45, worst true pair at 0.227) rather
-    /// than mid-plateau: a missed suggestion is a non-event, a false one is the
-    /// worst documented outcome, and the plateau was measured on clean audio
-    /// that real meeting captures will not match.
+    /// `tau` sits at the bottom of the Phase 0b zero-false-positive plateau
+    /// (0.25 to 0.45, worst true pair 0.227), not mid-plateau: that plateau came
+    /// from clean audio, and a false suggestion costs more than a missed one.
     public static let v1 = SpeakerMatchPolicy(
         tau: 0.25,
         margin: 0.10,
@@ -114,12 +97,9 @@ public struct SpeakerVoiceprintSuggestion: Sendable, Equatable {
     public let profileId: UUID
     public let displayName: String
     public let distance: Double
-    /// Next-best distance on either side, whichever is closer — what the
-    /// decision had to beat. `nil` when there was no second candidate at all.
+    /// What the decision had to beat; `nil` when there was no second candidate.
     public let runnerUpDistance: Double?
 
-    /// - Parameter runnerUpDistance: what this decision had to beat, or `nil`
-    ///   when there was no second candidate on either side.
     public init(
         speakerId: String,
         profileId: UUID,
@@ -135,7 +115,7 @@ public struct SpeakerVoiceprintSuggestion: Sendable, Equatable {
     }
 }
 
-/// Decides which enrolled voices to propose for the speakers of one recording.
+/// Decides which enrolled voices to propose for one recording's speakers.
 ///
 /// Stateless and I/O-free on purpose: this is where the feature can be wrong
 /// about a person, so it must be testable on fixtures alone.
@@ -181,9 +161,8 @@ public enum SpeakerVoiceprintMatcher {
             else { continue }
 
             // A side with no second candidate has nothing to be separated
-            // from, so its margin is vacuously satisfied. Failing it instead
-            // would make the very first enrolled voice unsuggestable, which is
-            // precisely when the feature is supposed to earn its keep.
+            // from, so its margin is vacuously satisfied. Failing it would make
+            // the first enrolled voice unsuggestable.
             if let runnerUp = best.runnerUp, runnerUp - best.distance < policy.margin { continue }
             if let runnerUp = bestForProfile.runnerUp, runnerUp - best.distance < policy.margin { continue }
 
@@ -200,15 +179,12 @@ public enum SpeakerVoiceprintMatcher {
         return suggestions
     }
 
-    /// The closest reference of a profile, and whether it was aggregated the
-    /// same way as the cluster.
     public struct ReferenceMatch: Sendable, Equatable {
         public let distance: Double
-        /// Whether the *winning* reference shares the cluster's aggregation
-        /// profile. Carried alongside the distance rather than derived later,
-        /// because the two must describe the same reference: a profile holding
-        /// both pre- and post-upgrade exemplars would otherwise be scored on an
-        /// old reference while being trusted as if it were current.
+        /// Of the *winning* reference, carried alongside the distance so the
+        /// two describe the same one: a profile holding both pre- and
+        /// post-upgrade exemplars would otherwise be scored on an old reference
+        /// while trusted as current.
         public let sameAggregation: Bool
     }
 
@@ -252,10 +228,8 @@ public enum SpeakerVoiceprintMatcher {
         return ReferenceMatch(distance: best.distance, sameAggregation: best.sameAggregation)
     }
 
-    /// The threshold for one pair. A reference aggregated under a different
-    /// clustering configuration is still comparable — Phase 0b leaves a 0.24
-    /// gap between the worst true pair and the best impostor, and configuration
-    /// drift costs hundredths — but it is trusted less.
+    /// A cross-aggregation reference stays comparable — Phase 0b leaves a 0.24
+    /// gap between worst true pair and best impostor — but is trusted less.
     private static func effectiveTau(for match: ReferenceMatch, policy: SpeakerMatchPolicy) -> Double {
         match.sameAggregation ? policy.tau : policy.tau - policy.crossAggregationPenalty
     }
@@ -268,9 +242,8 @@ public enum SpeakerVoiceprintMatcher {
     }
 
     /// Smallest distance in `row`, with the next smallest. An exact tie leaves
-    /// a zero margin, which the caller rejects — no tie-break by index or
-    /// insertion order, because an arbitrary winner is exactly the wrong
-    /// automatic name the design forbids.
+    /// a zero margin, which the caller rejects: no tie-break by index or
+    /// insertion order, since an arbitrary winner is a wrong automatic name.
     private static func bestCandidate(in row: [Double?]) -> Candidate? {
         var best: (index: Int, distance: Double)?
         var runnerUp: Double?
