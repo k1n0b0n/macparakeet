@@ -1,6 +1,16 @@
 import Foundation
 import GRDB
 
+/// Refusals the store raises to keep a profile's samples comparable.
+public enum SpeakerProfileStoreError: Error, Equatable {
+    /// The exemplar was produced by a different embedding model than the
+    /// profile it targets, so matching could never score it.
+    case incompatibleEmbeddingModel(profile: String, exemplar: String)
+    /// A profile's embedding model cannot change while it holds samples in the
+    /// old one. Re-enrollment creates fresh samples instead.
+    case embeddingModelChangeWithExemplars(UUID)
+}
+
 public protocol SpeakerProfileRepositoryProtocol: Sendable {
     func profiles() throws -> [SpeakerProfile]
     func profile(id: UUID) throws -> SpeakerProfile?
@@ -61,10 +71,22 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
     /// Recomputes the normalized key before writing: `displayName` is mutable,
     /// so a rename would otherwise leave the old key enforcing uniqueness while
     /// a lookup by the new name found nothing.
+    ///
+    /// Throws when the embedding model changes on a profile that already holds
+    /// samples: those samples would stay in the old representation and become
+    /// unscoreable, leaving a profile that looks populated and matches nothing.
     public func save(_ profile: SpeakerProfile) throws {
         var profile = profile
         profile.normalizedName = SpeakerProfile.normalizedName(for: profile.displayName)
         try dbQueue.write { db in
+            if let existing = try SpeakerProfile.fetchOne(db, key: profile.id),
+               existing.embeddingModelId != profile.embeddingModelId,
+               try SpeakerProfileExemplar
+                   .filter(Column("profileId") == profile.id)
+                   .fetchCount(db) > 0
+            {
+                throw SpeakerProfileStoreError.embeddingModelChangeWithExemplars(profile.id)
+            }
             try profile.save(db)
         }
     }
@@ -88,8 +110,23 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
         return Dictionary(grouping: all, by: \.profileId)
     }
 
+    /// Throws when the exemplar comes from a different embedding model than its
+    /// profile. Vectors from two models share no space, so such a sample would
+    /// be stored, counted and shown to the user while never scoring against
+    /// anything — a ghost with no signal to reveal it.
+    ///
+    /// A differing aggregation profile is accepted: that stays comparable, at a
+    /// tightened threshold the matcher applies.
     public func insert(_ exemplar: SpeakerProfileExemplar) throws {
         try dbQueue.write { db in
+            if let profile = try SpeakerProfile.fetchOne(db, key: exemplar.profileId),
+               profile.embeddingModelId != exemplar.embeddingModelId
+            {
+                throw SpeakerProfileStoreError.incompatibleEmbeddingModel(
+                    profile: profile.embeddingModelId,
+                    exemplar: exemplar.embeddingModelId
+                )
+            }
             try exemplar.insert(db)
         }
     }

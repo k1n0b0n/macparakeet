@@ -150,6 +150,112 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         XCTAssertEqual(try repo.exemplars(profileId: profile.id).count, 2)
     }
 
+    func testRejectsAnExemplarFromAnotherEmbeddingModel() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let otherModel = SpeakerModelIdentity(
+            embeddingModelId: "other-model",
+            aggregationProfileId: identity.aggregationProfileId
+        )
+        var values = [Float](repeating: 0, count: SpeakerEmbedding.dimension)
+        values[0] = 1
+        let foreign = try XCTUnwrap(SpeakerEmbedding(rawVector: values, identity: otherModel))
+
+        XCTAssertThrowsError(
+            try repo.insert(
+                SpeakerProfileExemplar(
+                    profileId: profile.id,
+                    embedding: foreign,
+                    speechSeconds: 20,
+                    captureDomain: .system,
+                    origin: .manualEnrollment
+                )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SpeakerProfileStoreError,
+                .incompatibleEmbeddingModel(profile: "test-model", exemplar: "other-model")
+            )
+        }
+        XCTAssertTrue(try repo.exemplars(profileId: profile.id).isEmpty)
+    }
+
+    /// A differing aggregation profile stays comparable — the matcher tightens
+    /// its threshold for it — so the store must not refuse it.
+    func testAcceptsAnExemplarFromAnotherAggregationProfile() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let otherAggregation = SpeakerModelIdentity(
+            embeddingModelId: identity.embeddingModelId,
+            aggregationProfileId: "other-aggregation"
+        )
+        var values = [Float](repeating: 0, count: SpeakerEmbedding.dimension)
+        values[1] = 1
+        let embedding = try XCTUnwrap(SpeakerEmbedding(rawVector: values, identity: otherAggregation))
+
+        XCTAssertNoThrow(
+            try repo.insert(
+                SpeakerProfileExemplar(
+                    profileId: profile.id,
+                    embedding: embedding,
+                    speechSeconds: 20,
+                    captureDomain: .system,
+                    origin: .manualEnrollment
+                )
+            )
+        )
+        XCTAssertEqual(try repo.exemplars(profileId: profile.id).count, 1)
+    }
+
+    func testRejectsAModelChangeOnAProfileThatHasSamples() throws {
+        var profile = try enrolledProfile(named: "Sarah")
+        try repo.insert(exemplar(profileId: profile.id, embedding: makeEmbedding(index: 1)))
+
+        profile = SpeakerProfile(
+            id: profile.id,
+            displayName: profile.displayName,
+            identity: SpeakerModelIdentity(
+                embeddingModelId: "next-model",
+                aggregationProfileId: identity.aggregationProfileId
+            )
+        )
+        XCTAssertThrowsError(try repo.save(profile)) { error in
+            XCTAssertEqual(
+                error as? SpeakerProfileStoreError, .embeddingModelChangeWithExemplars(profile.id)
+            )
+        }
+        XCTAssertEqual(try repo.profile(id: profile.id)?.embeddingModelId, "test-model")
+    }
+
+    func testAModelChangeIsAllowedWhileAProfileHasNoSamples() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let migrated = SpeakerProfile(
+            id: profile.id,
+            displayName: profile.displayName,
+            identity: SpeakerModelIdentity(
+                embeddingModelId: "next-model",
+                aggregationProfileId: identity.aggregationProfileId
+            )
+        )
+        XCTAssertNoThrow(try repo.save(migrated))
+        XCTAssertEqual(try repo.profile(id: profile.id)?.embeddingModelId, "next-model")
+    }
+
+    /// The stored key must not depend on the device locale: under a Turkish
+    /// locale, localized folding maps "I" to a dotless i, and every profile
+    /// whose name contains one would become unfindable after a locale change.
+    func testNormalizedKeyIsIndependentOfLocale() throws {
+        let profile = SpeakerProfile(displayName: "ISTANBUL", identity: identity)
+        try repo.save(profile)
+
+        XCTAssertEqual(
+            SpeakerProfile.normalizedName(for: "ISTANBUL"),
+            SpeakerProfile.normalizedName(for: "Istanbul")
+        )
+        XCTAssertEqual(try repo.profile(named: "istanbul")?.id, profile.id)
+        // Localized folding would give "ıstanbul" here; the canonical mapping
+        // must not.
+        XCTAssertEqual(SpeakerProfile.normalizedName(for: "ISTANBUL"), "istanbul")
+    }
+
     // MARK: Deletion
 
     func testDeletingAProfileRemovesItsExemplarsAndLinks() throws {
