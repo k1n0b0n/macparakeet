@@ -144,6 +144,51 @@ final class SpeakerVoiceprintMatcherTests: XCTestCase {
         XCTAssertTrue(suggestions.isEmpty)
     }
 
+    /// The tie rule must not depend on how the margin is configured: at
+    /// `margin: 0` the difference check passes and position alone would decide.
+    func testExactTieSuggestsNobodyEvenWithoutAMargin() {
+        let zeroMargin = SpeakerMatchPolicy(
+            tau: policy.tau,
+            margin: 0,
+            minSpeechSecondsToMatch: policy.minSpeechSecondsToMatch,
+            minSpeechSecondsToEnroll: policy.minSpeechSecondsToEnroll,
+            maxReferencesPerProfile: policy.maxReferencesPerProfile,
+            crossAggregationPenalty: policy.crossAggregationPenalty,
+            pollutionGuardDistance: policy.pollutionGuardDistance
+        )
+
+        let suggestions = SpeakerVoiceprintMatcher.match(
+            clusters: [cluster("S1", voice: 0, degrees: Angle.close)],
+            profiles: [profile("Sarah", voice: 0), profile("Sasha", voice: 0)],
+            policy: zeroMargin
+        )
+        XCTAssertTrue(suggestions.isEmpty)
+    }
+
+    /// A negative cap reaches `prefix`, whose precondition would bring matching
+    /// down; the policy clamps it instead.
+    func testANegativeReferenceCapIsClampedRatherThanFatal() {
+        let negative = SpeakerMatchPolicy(
+            tau: policy.tau,
+            margin: policy.margin,
+            minSpeechSecondsToMatch: policy.minSpeechSecondsToMatch,
+            minSpeechSecondsToEnroll: policy.minSpeechSecondsToEnroll,
+            maxReferencesPerProfile: -3,
+            crossAggregationPenalty: policy.crossAggregationPenalty,
+            pollutionGuardDistance: policy.pollutionGuardDistance
+        )
+        XCTAssertEqual(negative.maxReferencesPerProfile, 0)
+
+        // No references are scored, so nothing is proposed — and nothing traps.
+        XCTAssertTrue(
+            SpeakerVoiceprintMatcher.match(
+                clusters: [cluster("S1", voice: 0, degrees: 0)],
+                profiles: [profile("Sarah", voice: 0)],
+                policy: negative
+            ).isEmpty
+        )
+    }
+
     // MARK: Injectivity
 
     func testOneProfileIsNeverSuggestedForTwoSpeakers() {

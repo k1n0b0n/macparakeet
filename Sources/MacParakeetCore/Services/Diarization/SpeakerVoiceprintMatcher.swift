@@ -74,7 +74,10 @@ public struct SpeakerMatchPolicy: Sendable, Equatable {
         self.margin = margin
         self.minSpeechSecondsToMatch = minSpeechSecondsToMatch
         self.minSpeechSecondsToEnroll = minSpeechSecondsToEnroll
-        self.maxReferencesPerProfile = maxReferencesPerProfile
+        // Clamped rather than trusted: `prefix` precondition-fails on a
+        // negative length, and no configuration mistake should be able to bring
+        // matching down.
+        self.maxReferencesPerProfile = max(0, maxReferencesPerProfile)
         self.crossAggregationPenalty = crossAggregationPenalty
         self.pollutionGuardDistance = pollutionGuardDistance
     }
@@ -121,6 +124,12 @@ public struct SpeakerVoiceprintSuggestion: Sendable, Equatable {
 ///
 /// Stateless and I/O-free on purpose: this is where the feature can be wrong
 /// about a person, so it must be testable on fixtures alone.
+///
+/// `profileId` and `speakerId` must each be unique across the inputs. Scoring
+/// works on positions and results carry ids, so duplicates would yield two
+/// suggestions naming the same profile. Both callers satisfy this by
+/// construction — profiles come from a primary key, clusters from one
+/// diarization run.
 public enum SpeakerVoiceprintMatcher {
 
     /// Suggestions for `clusters`, at most one per cluster and one per profile.
@@ -165,8 +174,15 @@ public enum SpeakerVoiceprintMatcher {
             // A side with no second candidate has nothing to be separated
             // from, so its margin is vacuously satisfied. Failing it would make
             // the first enrolled voice unsuggestable.
-            if let runnerUp = best.runnerUp, runnerUp - best.distance < policy.margin { continue }
-            if let runnerUp = bestForProfile.runnerUp, runnerUp - best.distance < policy.margin { continue }
+            // Equality is checked before the configurable margin, which a
+            // policy may set to zero: a tie would then pass
+            // `runnerUp - best < 0` and position alone would decide.
+            if let runnerUp = best.runnerUp,
+               runnerUp == best.distance || runnerUp - best.distance < policy.margin
+            { continue }
+            if let runnerUp = bestForProfile.runnerUp,
+               runnerUp == best.distance || runnerUp - best.distance < policy.margin
+            { continue }
 
             suggestions.append(
                 SpeakerVoiceprintSuggestion(
