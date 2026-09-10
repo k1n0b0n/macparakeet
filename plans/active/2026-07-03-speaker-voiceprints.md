@@ -309,7 +309,7 @@ accumulation). That's Phase 3, a separate opt-in, decided later.
   excluded from **every** outward surface — JSON/TXT/MD/SRT/VTT/PDF/DOCX exports,
   `ExportCommand.projectedJSON()`, diagnostics, support bundles, and any future
   database export. This holds by construction (no export path reads these tables, and
-  nothing is added to `Transcription`), and PR 9 asserts it **per table on every
+  nothing is added to `Transcription`), and PR 10 asserts it **per table on every
   surface**, so a table added later cannot inherit the exemption silently.
 - **Privacy invariants**: profile store lives in the user DB, covered by existing
   user-data deletion rules.
@@ -339,23 +339,32 @@ differentiator, but honestly:
   distance distributions across meetings + channels. Output: research report with
   separation evidence, chosen τ + margin, and a GO/NO-GO. Kills the feature
   cheaply if WeSpeaker can't separate on compressed system audio.
-- **Phase 1 — core loop (meetings), nine independently shippable PRs.** PRs 1–5 are
-  invisible to users:
+- **Phase 1 — core loop (meetings), ten independently shippable PRs.** PRs 1–6 are
+  invisible to users, and the numbering matches the shipped PRs one-to-one:
   1. Surface embeddings through the diarization adapter: `SpeakerEmbedding` (normalizing
      on entry), `SpeakerCaptureDomain`, `SpeakerModelIdentity`, per-cluster speech
      durations, key remapping through `idMapping` (`DiarizationService.swift:227-234` —
-     FluidAudio also uses `S1`/`S2`, so skipping the remap silently mislabels).
-  2. Migration + `SpeakerProfileRepository`.
-  3. `SpeakerVoiceprintMatcher` — pure logic, the test-dense PR.
-  4. Service wiring + decision journal, flag off.
-  5. Short-lived enrollment candidates (decision 9): without them nothing can be
+     FluidAudio also uses `S1`/`S2`, so skipping the remap silently mislabels)
+     ([#994](https://github.com/moona3k/macparakeet/pull/994)).
+  2. Migration + `SpeakerProfileRepository`
+     ([#996](https://github.com/moona3k/macparakeet/pull/996)).
+  3. `SpeakerVoiceprintMatcher` — pure logic, the test-dense PR
+     ([#1000](https://github.com/moona3k/macparakeet/pull/1000)).
+  4. `SpeakerVoiceprintService` + decision journal + the preference, flag off
+     ([#1001](https://github.com/moona3k/macparakeet/pull/1001)).
+  5. Pipeline wiring: embeddings and durations through the finalizer, scoring after
+     the transcript is saved, injection in `AppEnvironment`
+     ([#1004](https://github.com/moona3k/macparakeet/pull/1004)). Split from 4, which
+     the July plan had as one item: the service is testable on fixtures alone, while
+     this touches the meeting path.
+  6. Short-lived enrollment candidates (decision 9): without them nothing can be
      enrolled after the fact, because the vector is gone by the time the user types
-     a name.
-  6. Consent sheet on the toggle + the enrollment prompt after a rename. The consent
+     a name ([#1005](https://github.com/moona3k/macparakeet/pull/1005)).
+  7. Consent sheet on the toggle + the enrollment prompt after a rename. The consent
      gate ships with, not after, the first surface that can turn writing on.
-  7. Suggestion banner (confirm/dismiss).
-  8. Voice-profile admin screen + a Reset & Cleanup row.
-  9. Leak tests (export JSON, CLI `projectedJSON()`, feedback bundle), specs, ADR,
+  8. Suggestion banner (confirm/dismiss).
+  9. Voice-profile admin screen + a Reset & Cleanup row.
+  10. Leak tests (export JSON, CLI `projectedJSON()`, feedback bundle), specs, ADR,
      privacy docs, telemetry allowlist.
 - **Phase 2 — breadth.** File/URL-transcription path (the Reddit author's
   185-episode podcast case), profile management UI, confirmation-driven
