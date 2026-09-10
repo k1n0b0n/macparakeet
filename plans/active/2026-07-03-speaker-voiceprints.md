@@ -225,10 +225,11 @@ accumulation). That's Phase 3, a separate opt-in, decided later.
   remove the contradiction. It preserves per-channel modes either way. A centroid may
   be computed on the fly for display, never for scoring; samples added only on user confirmation
   (no silent EMA — poisoning/drift). **At most one sample per profile per
-  recording** (the speaker-level aggregate): offline segment embeddings are
-  cluster-derived from the same centroid, so storing several from one meeting
-  would inflate `sampleCount` and fake diversity — K references should mean K
-  distinct recordings/channels.
+  recording**, and that sample is the normalized per-speaker centroid taken from
+  `DiarizationResult.speakerDatabase`, rekeyed through `idMapping` — not a
+  per-segment embedding, which the offline pipeline does not expose (Amendment 2).
+  A recording yields one vector, so storing several would inflate `sampleCount`
+  against no new evidence: K references must mean K distinct recordings.
 - Channel tags on every sample (`system`, `microphone`, `file`) — prefer
   same-channel references when scoring; channel mismatch is the default failure
   mode, not an edge case.
