@@ -650,12 +650,16 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
 
     // MARK: Helpers
 
+    /// Reads `enabled` once, at construction: capturing it lazily would put the
+    /// test case itself inside a `@Sendable` closure. Every test that flips the
+    /// preference does so before building its service.
     private func makeService() -> SpeakerVoiceprintService {
-        SpeakerVoiceprintService(
+        let enabled = enabled
+        return SpeakerVoiceprintService(
             profiles: profiles,
             journal: journal,
             policy: .v1,
-            isEnabled: { [self] in enabled }
+            isEnabled: { enabled }
         )
     }
 
@@ -707,7 +711,9 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
 
 /// Hides a name from the first lookup so `enroll` takes the path where another
 /// enrollment claimed it in between.
-private final class NameHidingStore: SpeakerProfileRepositoryProtocol {
+/// `@unchecked` because the lock is what makes `hidden` safe, and the compiler
+/// cannot see that.
+private final class NameHidingStore: SpeakerProfileRepositoryProtocol, @unchecked Sendable {
     private let wrapped: SpeakerProfileRepository
     private let lock = NSLock()
     private var hidden = true
