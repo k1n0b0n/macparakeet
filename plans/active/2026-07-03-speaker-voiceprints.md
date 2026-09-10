@@ -180,10 +180,14 @@ transplant them onto WeSpeaker. Hence Phase 0.
 
 Enrollment flywheel, correction-based (the Otter/Circleback pattern, minus cloud):
 
+0. Turning "Remember speakers" on opens the consent sheet ("I have the participants'
+   permission…"). Refusing leaves the toggle off, and `rememberSpeakersEnabled`
+   resolves to off until a consent date exists (Amendment, decision 9). The gate sits
+   here rather than at the first enrollment because a voice is now kept at the end of
+   every meeting: a gate on naming would arrive after the first write.
 1. User renames "Others 1" → "Sarah" in an existing meeting transcript (existing UI).
 2. If "Remember speakers" is enabled: prompt "Remember this voice as Sarah? Future
-   meetings will suggest her name automatically." First-ever enrollment shows the
-   consent gate ("I have the participants' permission…").
+   meetings will suggest her name automatically."
 3. Profile stored locally (embeddings only, never audio).
 4. Next diarized recording: matcher compares detected-speaker embeddings against
    profiles → high-confidence matches surface as **suggestions** ("Looks like Sarah
@@ -243,7 +247,8 @@ accumulation). That's Phase 3, a separate opt-in, decided later.
 ### Architecture
 
 - **New GRDB migration `v0.39-speaker-voiceprints` + 3 tables** (raw SQL, style of
-  `v0.32-speaker-corrections`, `DatabaseManager.swift:1374-1422`):
+  `v0.32-speaker-corrections`, `DatabaseManager.swift:1374-1422`), joined by the
+  decision journal in `v0.40` and enrollment candidates in `v0.41` (below):
   - `speaker_profiles`: id, displayName (`UNIQUE … COLLATE NOCASE`, so a second
     rename to "Sarah" adds an exemplar instead of a duplicate), embeddingModelId,
     aggregationProfileId, timestamps, lastMatchedAt, lastEvaluatedAt,
@@ -258,6 +263,20 @@ accumulation). That's Phase 3, a separate opt-in, decided later.
     profileId, status (suggested/confirmed/dismissed), distance, runnerUpDistance.
     Fingerprint-scoped like `speaker_corrections`, so a stale `dismissed` cannot
     permanently suppress a legitimate suggestion.
+- **`v0.41-speaker-embedding-candidates`** (Amendment, decision 9), owned by
+  `SpeakerEmbeddingCandidateRepository`: `UNIQUE (transcriptionId, speakerId,
+  transcriptFingerprint)` — fingerprint-scoped for the same reason as the links, since
+  after re-diarization the same id can mean another person — vector
+  `BLOB CHECK (length = 1024)`, speechSeconds, captureDomain, the two model ids,
+  `transcriptionId … ON DELETE CASCADE` (unlike an exemplar, a candidate *is* about
+  that recording), and `expiresAt` **stored per row**, indexed, so raising the
+  retention constant later cannot revive a vector promised a shorter life.
+  Promotion and deletion are one transaction on the exemplar side:
+  `insertExemplar` applies the cap and inserts, then the candidate row is dropped, so
+  the vector is never stored twice. Writes happen only under
+  `rememberSpeakersEnabled`, which requires acknowledged consent (decision 9), and
+  only above `minSpeechSecondsToEnroll` — a vector that can never be promoted would
+  be biometric data held for an offer never made. Never read by the matcher.
 - **`SpeakerVoiceprintService`**, a `final class … @unchecked Sendable` — **not** an
   actor, aligning with its direct neighbour `SpeakerCorrectionService` (`:59`), since
   GRDB already serializes through `dbQueue`. Matching itself lives in a stateless,
@@ -286,12 +305,12 @@ accumulation). That's Phase 3, a separate opt-in, decided later.
   transcript labels survive. "Delete all voice profiles" is the same transaction over
   every profile, not a loop that can half-fail.
 - **Export boundary**: `speaker_profiles`, `speaker_profile_exemplars`,
-  `speaker_profile_links` and the decision journal are excluded from **every** outward
-  surface — JSON/TXT/MD/SRT/VTT/PDF/DOCX exports, `ExportCommand.projectedJSON()`,
-  diagnostics, support bundles, and any future database export. This holds by
-  construction (no export path reads these tables, and nothing is added to
-  `Transcription`), and PR 8 adds contract tests that assert it per table rather than
-  relying on that construction staying true.
+  `speaker_profile_links`, `speaker_embedding_candidates` and the decision journal are
+  excluded from **every** outward surface — JSON/TXT/MD/SRT/VTT/PDF/DOCX exports,
+  `ExportCommand.projectedJSON()`, diagnostics, support bundles, and any future
+  database export. This holds by construction (no export path reads these tables, and
+  nothing is added to `Transcription`), and PR 9 asserts it **per table on every
+  surface**, so a table added later cannot inherit the exemption silently.
 - **Privacy invariants**: profile store lives in the user DB, covered by existing
   user-data deletion rules.
 
@@ -320,7 +339,7 @@ differentiator, but honestly:
   distance distributions across meetings + channels. Output: research report with
   separation evidence, chosen τ + margin, and a GO/NO-GO. Kills the feature
   cheaply if WeSpeaker can't separate on compressed system audio.
-- **Phase 1 — core loop (meetings), eight independently shippable PRs.** PRs 1–5 are
+- **Phase 1 — core loop (meetings), nine independently shippable PRs.** PRs 1–5 are
   invisible to users:
   1. Surface embeddings through the diarization adapter: `SpeakerEmbedding` (normalizing
      on entry), `SpeakerCaptureDomain`, `SpeakerModelIdentity`, per-cluster speech
@@ -332,9 +351,11 @@ differentiator, but honestly:
   5. Short-lived enrollment candidates (decision 9): without them nothing can be
      enrolled after the fact, because the vector is gone by the time the user types
      a name.
-  6. Enrollment prompt, consent gate, suggestion banner (confirm/dismiss).
-  7. Voice-profile admin screen + a Reset & Cleanup row.
-  8. Leak tests (export JSON, CLI `projectedJSON()`, feedback bundle), specs, ADR,
+  6. Consent sheet on the toggle + the enrollment prompt after a rename. The consent
+     gate ships with, not after, the first surface that can turn writing on.
+  7. Suggestion banner (confirm/dismiss).
+  8. Voice-profile admin screen + a Reset & Cleanup row.
+  9. Leak tests (export JSON, CLI `projectedJSON()`, feedback bundle), specs, ADR,
      privacy docs, telemetry allowlist.
 - **Phase 2 — breadth.** File/URL-transcription path (the Reddit author's
   185-episode podcast case), profile management UI, confirmation-driven
@@ -352,7 +373,7 @@ differentiator, but honestly:
 
 1. **Auto-apply: strict confirm in v1.** Every match surfaces as a suggestion requiring confirmation; opt-in auto-apply (provenance chip + undo) reconsidered only after dogfooding shows precision.
 2. **Ambient embeddings: NO.** v1 stores embeddings only for explicitly enrolled speakers; recurring-unknown detection remains a Phase 3 decision with its own opt-in.
-3. **BIPA posture: docs + consent gate only.** First-enrollment permission acknowledgment plus plain-language guidance; no regional gating.
+3. **BIPA posture: docs + consent gate only.** Permission acknowledgment plus plain-language guidance; no regional gating. (Amended 2026-09-10: the acknowledgment moved from the first enrollment to the toggle — see decision 9.)
 4. **Podcast/file scope: Phase 2.** v1 is meetings-only to keep the first PR series reviewable.
 
 ## Decisions (2026-09-09)
@@ -390,6 +411,14 @@ differentiator, but honestly:
    excluded from exports, stated in the consent sheet, and expiring after seven days on
    a per-row `expiresAt` so raising the constant cannot resurrect them. Anarlog keeps 45
    days; naming is a same-week action and unnamed vectors earn nothing by waiting.
+
+   **The consent gate moves with the first write.** It sat at the first enrollment,
+   which was sound while nothing was stored before one. Keeping it there now would let
+   a user turn the toggle on and have vectors on disk having seen nothing, and gating
+   candidate writes on a consent asked at naming time is circular — naming needs a
+   candidate that would never have been written. So `rememberSpeakersEnabled` requires
+   an acknowledged consent date alongside the toggle and speaker detection, and the
+   sheet opens from the toggle. Amends decision 3.
 
    Decision 2 targeted ambient accumulation — an app that banks everyone's voice unasked.
    With the preference off by default nothing is stored until the user asks for the
