@@ -256,6 +256,87 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         XCTAssertEqual(SpeakerProfile.normalizedName(for: "ISTANBUL"), "istanbul")
     }
 
+    func testRejectsAProfileWhoseNameNormalizesToNothing() throws {
+        for blank in ["", "   ", "\n\t "] {
+            XCTAssertThrowsError(
+                try repo.save(SpeakerProfile(displayName: blank, identity: identity))
+            ) { error in
+                XCTAssertEqual(error as? SpeakerProfileStoreError, .emptyDisplayName)
+            }
+        }
+        XCTAssertTrue(try repo.profiles().isEmpty)
+    }
+
+    func testASuggestionCannotOverwriteAConfirmedDecision() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let transcription = try savedTranscription()
+
+        var confirmed = link(transcriptionId: transcription.id, profileId: profile.id)
+        confirmed.status = .confirmed
+        try repo.save(confirmed)
+
+        XCTAssertThrowsError(
+            try repo.save(link(transcriptionId: transcription.id, profileId: profile.id))
+        ) { error in
+            XCTAssertEqual(
+                error as? SpeakerProfileStoreError,
+                .terminalDecisionAlreadyRecorded(status: .confirmed)
+            )
+        }
+        XCTAssertEqual(
+            try repo.links(transcriptionId: transcription.id, fingerprint: "fingerprint")
+                .map(\.status),
+            [.confirmed]
+        )
+    }
+
+    func testASuggestionCannotOverwriteADismissedDecision() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let transcription = try savedTranscription()
+
+        var dismissed = link(transcriptionId: transcription.id, profileId: profile.id)
+        dismissed.status = .dismissed
+        try repo.save(dismissed)
+
+        XCTAssertThrowsError(
+            try repo.save(link(transcriptionId: transcription.id, profileId: profile.id))
+        )
+    }
+
+    func testASuggestionStillBecomesTerminal() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let transcription = try savedTranscription()
+        try repo.save(link(transcriptionId: transcription.id, profileId: profile.id))
+
+        var confirmed = link(transcriptionId: transcription.id, profileId: profile.id)
+        confirmed.status = .confirmed
+        XCTAssertNoThrow(try repo.save(confirmed))
+        XCTAssertEqual(
+            try repo.links(transcriptionId: transcription.id, fingerprint: "fingerprint")
+                .map(\.status),
+            [.confirmed]
+        )
+    }
+
+    /// The composite foreign key is what makes the model invariant structural
+    /// rather than merely enforced in Swift.
+    func testTheDatabaseItselfRefusesAMismatchedExemplarModel() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        XCTAssertThrowsError(
+            try dbQueue.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO speaker_profile_exemplars
+                        (id, profileId, vector, speechSeconds, captureDomain, origin,
+                         embeddingModelId, aggregationProfileId, createdAt)
+                        VALUES (?, ?, ?, ?, 'system', 'manualEnrollment', 'other-model', 'a', ?)
+                        """,
+                    arguments: [UUID(), profile.id, makeEmbedding(index: 1).data, 20.0, Date()]
+                )
+            }
+        )
+    }
+
     // MARK: Deletion
 
     func testDeletingAProfileRemovesItsExemplarsAndLinks() throws {

@@ -1958,15 +1958,16 @@ public final class DatabaseManager: Sendable {
             try db.execute(sql: """
                 CREATE TABLE speaker_profiles (
                     id TEXT PRIMARY KEY NOT NULL,
-                    displayName TEXT NOT NULL,
-                    normalizedName TEXT NOT NULL,
+                    displayName TEXT NOT NULL CHECK (length(trim(displayName)) > 0),
+                    normalizedName TEXT NOT NULL CHECK (length(normalizedName) > 0),
                     embeddingModelId TEXT NOT NULL,
                     aggregationProfileId TEXT NOT NULL,
                     createdAt TEXT NOT NULL,
                     updatedAt TEXT NOT NULL,
                     lastMatchedAt TEXT,
                     lastEvaluatedAt TEXT,
-                    lastEvaluatedDistance REAL
+                    lastEvaluatedDistance REAL,
+                    UNIQUE (id, embeddingModelId)
                 )
                 """)
             // On the normalized key, not `displayName COLLATE NOCASE`: NOCASE
@@ -1979,8 +1980,7 @@ public final class DatabaseManager: Sendable {
             try db.execute(sql: """
                 CREATE TABLE speaker_profile_exemplars (
                     id TEXT PRIMARY KEY NOT NULL,
-                    profileId TEXT NOT NULL
-                        REFERENCES speaker_profiles(id) ON DELETE CASCADE,
+                    profileId TEXT NOT NULL,
                     vector BLOB NOT NULL CHECK (length(vector) = 1024),
                     speechSeconds REAL NOT NULL CHECK (speechSeconds > 0),
                     captureDomain TEXT NOT NULL CHECK (
@@ -1995,7 +1995,17 @@ public final class DatabaseManager: Sendable {
                         REFERENCES transcriptions(id) ON DELETE SET NULL,
                     sourceSpeakerId TEXT,
                     createdAt TEXT NOT NULL,
-                    UNIQUE (profileId, sourceTranscriptionId)
+                    UNIQUE (profileId, sourceTranscriptionId),
+                    -- Composite key rather than a plain reference to the id: a
+                    -- sample from another embedding model shares no space with
+                    -- the profile's, so it could be stored and shown while
+                    -- never scoring against anything. No ON UPDATE CASCADE —
+                    -- changing a profile's model must fail while samples in the
+                    -- old one exist. aggregationProfileId stays out: those
+                    -- remain comparable at a tightened threshold.
+                    FOREIGN KEY (profileId, embeddingModelId)
+                        REFERENCES speaker_profiles(id, embeddingModelId)
+                        ON DELETE CASCADE
                 )
                 """)
             try db.execute(sql: """

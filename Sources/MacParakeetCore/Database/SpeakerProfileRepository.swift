@@ -9,6 +9,12 @@ public enum SpeakerProfileStoreError: Error, Equatable {
     /// A profile's embedding model cannot change while it holds samples in the
     /// old one. Re-enrollment creates fresh samples instead.
     case embeddingModelChangeWithExemplars(UUID)
+    /// A name that normalizes to nothing has no lookup key, so it could neither
+    /// be found again nor keep a second blank name from colliding with it.
+    case emptyDisplayName
+    /// A decision the user already made is not overwritten by a fresh
+    /// suggestion.
+    case terminalDecisionAlreadyRecorded(status: SpeakerProfileLink.Status)
 }
 
 public protocol SpeakerProfileRepositoryProtocol: Sendable {
@@ -77,7 +83,11 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
     /// unscoreable, leaving a profile that looks populated and matches nothing.
     public func save(_ profile: SpeakerProfile) throws {
         var profile = profile
+        profile.displayName = profile.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.normalizedName = SpeakerProfile.normalizedName(for: profile.displayName)
+        guard !profile.normalizedName.isEmpty else {
+            throw SpeakerProfileStoreError.emptyDisplayName
+        }
         try dbQueue.write { db in
             if let existing = try SpeakerProfile.fetchOne(db, key: profile.id),
                existing.embeddingModelId != profile.embeddingModelId,
@@ -160,6 +170,14 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
                 .filter(Column("transcriptFingerprint") == link.transcriptFingerprint)
                 .fetchOne(db)
             if let existing {
+                // A suggestion may become confirmed or dismissed, never the
+                // other way round: a second evaluation of the same transcript
+                // would otherwise erase what the user answered.
+                if link.status == .suggested, existing.status != .suggested {
+                    throw SpeakerProfileStoreError.terminalDecisionAlreadyRecorded(
+                        status: existing.status
+                    )
+                }
                 link.createdAt = existing.createdAt
             }
             try link.save(db)
