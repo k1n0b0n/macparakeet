@@ -347,46 +347,6 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         XCTAssertEqual(entries.map(\.transcriptFingerprint), [fingerprint.rawValue])
     }
 
-    /// Only the first `maxReferencesPerProfile` are scored, so the newest
-    /// samples must be the ones that survive the cap.
-    func testTheNewestExemplarsAreTheOnesScored() async throws {
-        let service = makeService()
-        let first = try savedTranscription()
-        let profile = try await enrolledSarah(transcriptionId: first.id)
-
-        // Fill the cap with samples of one voice, then add a newer one that
-        // sits on a different voice entirely.
-        for index in 1..<SpeakerMatchPolicy.v1.maxReferencesPerProfile {
-            let recording = try savedTranscription()
-            _ = try await service.enroll(
-                displayName: "Sarah",
-                observation: cluster("S\(index)", voice: 0, degrees: 0),
-                transcriptionId: recording.id,
-                allowMergeIntoExistingName: true
-            )
-        }
-        let newest = try savedTranscription()
-        _ = try await service.enroll(
-            displayName: "Sarah",
-            observation: cluster("S99", voice: 6, degrees: 0),
-            transcriptionId: newest.id,
-            allowMergeIntoExistingName: true
-        )
-        XCTAssertEqual(
-            try profiles.exemplars(profileId: profile.id).count,
-            SpeakerMatchPolicy.v1.maxReferencesPerProfile + 1
-        )
-
-        // The newest sample decides, which it could not if the cap kept the
-        // oldest ten.
-        let suggestions = try await service.evaluate(
-            transcriptionId: try savedTranscription().id,
-            fingerprint: fingerprint,
-            clusters: [cluster("S1", voice: 6, degrees: 0)]
-        )
-        XCTAssertEqual(suggestions.map(\.displayName), ["Sarah"])
-    }
-
     /// An embedding from another model carries no comparable evidence, so it
     /// must not slip past the guard into a silent merge.
     func testEnrollingWithAnIncomparableModelAsksInstead() async throws {
@@ -498,6 +458,105 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             try profiles.links(transcriptionId: next.id, fingerprint: fingerprint.rawValue)
                 .map(\.status),
             [.confirmed]
+        )
+    }
+
+    /// The cap has to bound storage, not just scoring: vectors the matcher can
+    /// never reach would be biometric data kept for nothing.
+    func testTheOldestConfirmationIsEvictedAtTheCap() async throws {
+        let service = makeService()
+        let first = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: first.id)
+
+        // A second manual enrollment unlocks learning from confirmations.
+        let second = try savedTranscription()
+        _ = try await service.enroll(
+            displayName: "Sarah",
+            observation: cluster("S1", voice: 0, degrees: 14.1),
+            transcriptionId: second.id,
+            allowMergeIntoExistingName: false
+        )
+
+        // Fill the rest of the cap with confirmations.
+        var confirmedRecordings: [UUID] = []
+        while try profiles.exemplars(profileId: profile.id).count
+            < SpeakerMatchPolicy.v1.maxReferencesPerProfile
+        {
+            let recording = try savedTranscription()
+            confirmedRecordings.append(recording.id)
+            let suggestions = try await service.evaluate(
+                transcriptionId: recording.id,
+                fingerprint: fingerprint,
+                clusters: [cluster("S1", voice: 0, degrees: 14.1)]
+            )
+            try await service.confirm(
+                try XCTUnwrap(suggestions.first),
+                observation: cluster("S1", voice: 0, degrees: 14.1),
+                transcriptionId: recording.id,
+                fingerprint: fingerprint
+            )
+        }
+        XCTAssertEqual(
+            try profiles.exemplars(profileId: profile.id).count,
+            SpeakerMatchPolicy.v1.maxReferencesPerProfile
+        )
+        let oldestConfirmation = try XCTUnwrap(confirmedRecordings.first)
+
+        // One more recording: the count holds and the oldest confirmation goes.
+        let extra = try savedTranscription()
+        let suggestions = try await service.evaluate(
+            transcriptionId: extra.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 14.1)]
+        )
+        try await service.confirm(
+            try XCTUnwrap(suggestions.first),
+            observation: cluster("S1", voice: 0, degrees: 14.1),
+            transcriptionId: extra.id,
+            fingerprint: fingerprint
+        )
+
+        let stored = try profiles.exemplars(profileId: profile.id)
+        XCTAssertEqual(stored.count, SpeakerMatchPolicy.v1.maxReferencesPerProfile)
+        XCTAssertFalse(stored.contains { $0.sourceTranscriptionId == oldestConfirmation })
+        XCTAssertTrue(stored.contains { $0.sourceTranscriptionId == extra.id })
+        // Both manual anchors survive, so the profile keeps its right to learn.
+        XCTAssertEqual(stored.filter { $0.origin == .manualEnrollment }.count, 2)
+    }
+
+    /// Ten manual enrollments are the strongest evidence there is; there is
+    /// nothing to evict without weakening the anchor.
+    func testAProfileFullOfManualEnrollmentsRefusesMore() async throws {
+        let service = makeService()
+        let first = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: first.id)
+
+        while try profiles.exemplars(profileId: profile.id).count
+            < SpeakerMatchPolicy.v1.maxReferencesPerProfile
+        {
+            let recording = try savedTranscription()
+            _ = try await service.enroll(
+                displayName: "Sarah",
+                observation: cluster("S1", voice: 0, degrees: 14.1),
+                transcriptionId: recording.id,
+                allowMergeIntoExistingName: false
+            )
+        }
+
+        let overflow = try savedTranscription()
+        let result = try await service.enroll(
+            displayName: "Sarah",
+            observation: cluster("S1", voice: 0, degrees: 14.1),
+            transcriptionId: overflow.id,
+            allowMergeIntoExistingName: false
+        )
+
+        guard case .rejectedProfileFull = result else {
+            return XCTFail("expected a refusal, got \(result)")
+        }
+        XCTAssertEqual(
+            try profiles.exemplars(profileId: profile.id).count,
+            SpeakerMatchPolicy.v1.maxReferencesPerProfile
         )
     }
 

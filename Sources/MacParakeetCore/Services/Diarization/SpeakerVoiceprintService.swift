@@ -13,6 +13,10 @@ public enum SpeakerProfileEnrollment: Sendable, Equatable {
     case rejectedTooShort(speechSeconds: Double)
     /// The profile already holds a sample from this recording.
     case alreadySampled(SpeakerProfile)
+    /// The profile is at its sample cap and every sample is a manual
+    /// enrollment, so there is nothing to evict without weakening the anchor
+    /// that lets it learn.
+    case rejectedProfileFull(SpeakerProfile)
 }
 
 public protocol SpeakerVoiceprintServicing: Sendable {
@@ -175,12 +179,12 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
             .contains { $0.sourceTranscriptionId == transcriptionId }
         guard !sampled else { return .alreadySampled(existing) }
 
-        try addExemplar(
+        guard try addExemplar(
             to: existing,
             observation: observation,
             origin: .manualEnrollment,
             transcriptionId: transcriptionId
-        )
+        ) else { return .rejectedProfileFull(existing) }
         existing.updatedAt = now()
         try profiles.save(existing)
         return .addedExemplar(existing)
@@ -294,12 +298,30 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         )
     }
 
+    /// Adds a sample, evicting the oldest confirmation once the cap is reached.
+    /// Returns `false` when the profile is full of manual enrollments.
+    ///
+    /// The cap bounds storage, not just scoring: keeping vectors the matcher
+    /// will never reach would accumulate biometric data for nothing. Eviction
+    /// spares manual enrollments because `confirm` counts them to decide
+    /// whether a profile may learn at all — evicting them oldest-first would
+    /// drop a mature profile back below that anchor for no visible reason.
+    @discardableResult
     private func addExemplar(
         to profile: SpeakerProfile,
         observation: SpeakerClusterObservation,
         origin: SpeakerProfileExemplar.Origin,
         transcriptionId: UUID?
-    ) throws {
+    ) throws -> Bool {
+        let existing = try profiles.exemplars(profileId: profile.id)
+        if existing.count >= policy.maxReferencesPerProfile {
+            guard let evictable = existing
+                .filter({ $0.origin == .confirmedSuggestion })
+                .min(by: { $0.createdAt < $1.createdAt })
+            else { return false }
+            _ = try profiles.deleteExemplar(id: evictable.id)
+        }
+
         try profiles.insert(
             SpeakerProfileExemplar(
                 profileId: profile.id,
@@ -312,6 +334,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 createdAt: now()
             )
         )
+        return true
     }
 
     /// Pending links for suggestions, and every decision to the local journal.
