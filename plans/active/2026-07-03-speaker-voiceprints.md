@@ -28,11 +28,13 @@ Re-verified against `main` (FluidAudio 0.15.6, speaker-correction layer shipped
 in [PR #960](https://github.com/moona3k/macparakeet/pull/960)). Six errors, three
 additions. Corrections are applied in place below.
 
-**Scope locked:** meetings only · `rememberSpeakers` off by default · tau is a
-compiled constant with a hidden `UserDefaults` override, never a user setting ·
-calibration via a local decision journal, not an on-demand re-diarization ·
-literal #662 ask (recurring unknowns) out of scope, no columns, no follow-up ·
-vectors as `BLOB` in the user DB · no auto-apply.
+**Scope locked:** meetings only · `rememberSpeakers` off by default and gated on
+acknowledged consent · tau is a compiled constant with a hidden `UserDefaults`
+override, never a user setting · calibration via a local decision journal, not an
+on-demand re-diarization · literal #662 ask (recurring unknowns) out of scope, no
+columns, no follow-up · permanent vectors only for enrolled people, plus short-lived
+enrollment candidates that are never compared to each other (decision 9) · vectors as
+`BLOB` in the user DB · no auto-apply.
 
 **Corrections:**
 
@@ -195,15 +197,25 @@ Enrollment flywheel, correction-based (the Otter/Circleback pattern, minus cloud
 5. Confirmation applies the label via the existing rename path. Adding that
    meeting's embedding as a new profile sample is part of the confirm action's
    *disclosed* semantics ("Confirm and improve Sarah's voice profile") — samples
-   are only ever added to already-enrolled profiles via this explicit act, so v1
-   never retains voiceprints from ambient recordings for anyone unenrolled.
+   are only ever added to already-enrolled profiles via this explicit act.
 6. Unknowns stay "Others N". Below-margin matches stay unknown ("wrong automatic
    names are worse than anonymous speakers").
 
-Scope call (recommended): v1 stores embeddings **only for explicitly enrolled
-speakers**. The issue's literal ask — "this voice appeared in 5 recordings, name
-them?" — requires retaining voiceprints of people nobody enrolled (ambient biometric
-accumulation). That's Phase 3, a separate opt-in, decided later.
+Scope call: v1 keeps two kinds of vector, and the difference is the whole privacy
+argument.
+
+- **Profile exemplars** are permanent and belong to a named person. Only an explicit
+  enrollment or a confirmed suggestion creates one.
+- **Enrollment candidates** (Amendment, decision 9) are short-lived and belong to no
+  one. Step 1 above happens after the meeting, when the vector has already been
+  discarded, so without them nothing can be named at all. They are consent-gated,
+  capped at seven days, deleted on promotion or with their recording, and **never
+  compared against each other**.
+
+That last property is what keeps the issue's literal ask — "this voice appeared in 5
+recordings, name them?" — out of scope: answering it means comparing unenrolled
+vectors to one another, which is the ambient accumulation this plan refuses. Phase 3,
+a separate opt-in, decided later.
 
 ### Matching policy (matching-best-practices report; numbers are pre-calibration placeholders)
 
@@ -381,7 +393,7 @@ differentiator, but honestly:
 ## Decisions (Daniel, 2026-07-04)
 
 1. **Auto-apply: strict confirm in v1.** Every match surfaces as a suggestion requiring confirmation; opt-in auto-apply (provenance chip + undo) reconsidered only after dogfooding shows precision.
-2. **Ambient embeddings: NO.** v1 stores embeddings only for explicitly enrolled speakers; recurring-unknown detection remains a Phase 3 decision with its own opt-in.
+2. **Ambient embeddings: NO.** v1 stores embeddings only for explicitly enrolled speakers; recurring-unknown detection remains a Phase 3 decision with its own opt-in. (Amended 2026-09-10: permanent storage is still enrollment-only, but decision 9 adds short-lived enrollment candidates — never compared to each other, so recurring-unknown detection stays out of scope.)
 3. **BIPA posture: docs + consent gate only.** Permission acknowledgment plus plain-language guidance; no regional gating. (Amended 2026-09-10: the acknowledgment moved from the first enrollment to the toggle — see decision 9.)
 4. **Podcast/file scope: Phase 2.** v1 is meetings-only to keep the first PR series reviewable.
 
