@@ -118,6 +118,20 @@ final class DiarizationServiceEmbeddingTests: XCTestCase {
         XCTAssertTrue(result.speakerEmbeddings.isEmpty)
     }
 
+    /// The gates are in seconds and everything else here is in milliseconds, so
+    /// the conversion lives in one tested place rather than at each call site.
+    func testSpeechSecondsConvertsFromMilliseconds() {
+        let result = MacParakeetDiarizationResult(
+            segments: [],
+            speakerCount: 1,
+            speakers: [SpeakerInfo(id: "S1", label: "Speaker 1")],
+            speechMsBySpeaker: ["S1": 12_500]
+        )
+
+        XCTAssertEqual(result.speechSeconds(forSpeaker: "S1"), 12.5, accuracy: 1e-9)
+        XCTAssertEqual(result.speechSeconds(forSpeaker: "S2"), 0)
+    }
+
     // MARK: Model identity
 
     func testAggregationProfileChangesWithClusteringConfiguration() {

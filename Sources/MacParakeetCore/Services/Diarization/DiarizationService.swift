@@ -33,6 +33,20 @@ public struct MacParakeetDiarizationResult: Sendable {
         self.speakerEmbeddings = speakerEmbeddings
         self.speechMsBySpeaker = speechMsBySpeaker
     }
+
+    /// Speech for one speaker, in seconds.
+    ///
+    /// The single conversion point between this type's milliseconds — the unit
+    /// every other diarization value uses — and the seconds that duration gates
+    /// are expressed in. Dividing at each call site invites the one mistake
+    /// nothing would catch: a factor of a thousand turns a three-second gate
+    /// into a fifty-minute one, so every speaker silently stops qualifying and
+    /// the feature just never fires.
+    ///
+    /// Returns 0 for a speaker with no recorded speech.
+    public func speechSeconds(forSpeaker speakerId: String) -> Double {
+        Double(speechMsBySpeaker[speakerId] ?? 0) / 1000
+    }
 }
 
 public struct SpeakerSegment: Sendable {
