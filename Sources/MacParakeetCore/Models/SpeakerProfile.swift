@@ -9,9 +9,14 @@ import GRDB
 /// aggregate would be an unused cache with its own coherency bugs.
 public struct SpeakerProfile: Codable, Identifiable, Sendable, Equatable {
     public var id: UUID
-    /// Unique case-insensitively: renaming another speaker to this name adds an
-    /// exemplar here rather than creating a rival profile.
+    /// As the user typed it. Display only — never compared directly.
     public var displayName: String
+    /// The key uniqueness and lookup both use, derived from `displayName`.
+    ///
+    /// Kept as a column rather than computed in a query so that the database
+    /// constraint and the Swift lookup can never disagree about what counts as
+    /// the same name. Set it through ``normalizedName(for:)``.
+    public var normalizedName: String
     public var embeddingModelId: String
     public var aggregationProfileId: String
     public var createdAt: Date
@@ -41,6 +46,7 @@ public struct SpeakerProfile: Codable, Identifiable, Sendable, Equatable {
     ) {
         self.id = id
         self.displayName = displayName
+        self.normalizedName = Self.normalizedName(for: displayName)
         self.embeddingModelId = identity.embeddingModelId
         self.aggregationProfileId = identity.aggregationProfileId
         self.createdAt = createdAt
@@ -55,6 +61,20 @@ public struct SpeakerProfile: Codable, Identifiable, Sendable, Equatable {
             embeddingModelId: embeddingModelId,
             aggregationProfileId: aggregationProfileId
         )
+    }
+
+    /// The comparison key for a display name: trimmed, then case-folded across
+    /// the whole of Unicode.
+    ///
+    /// Accents are deliberately kept. Folding them too would make "Jose" and
+    /// "José" one person, which is a guess about identity rather than about
+    /// typography — and the wrong guess merges two colleagues silently. When
+    /// two people really do share a name, the enrollment guard catches it by
+    /// voice instead.
+    public static func normalizedName(for displayName: String) -> String {
+        displayName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .widthInsensitive], locale: nil)
     }
 }
 

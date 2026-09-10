@@ -30,7 +30,7 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
             XCTAssertEqual(
                 Set(try db.columns(in: "speaker_profiles").map(\.name)),
                 [
-                    "id", "displayName", "embeddingModelId", "aggregationProfileId",
+                    "id", "displayName", "normalizedName", "embeddingModelId", "aggregationProfileId",
                     "createdAt", "updatedAt", "lastMatchedAt", "lastEvaluatedAt",
                     "lastEvaluatedDistance",
                 ]
@@ -285,6 +285,32 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         try repo.save(profile)
         XCTAssertEqual(try repo.profile(named: "josé")?.id, profile.id)
         XCTAssertEqual(try repo.profile(named: "JOSÉ")?.id, profile.id)
+    }
+
+    /// The constraint and the lookup must agree on what one name is, otherwise
+    /// two rows can exist that a lookup considers equal and picks between at
+    /// random.
+    func testNonAsciiCaseVariantsCannotBothBeStored() throws {
+        try repo.save(SpeakerProfile(displayName: "José", identity: identity))
+        XCTAssertThrowsError(try repo.save(SpeakerProfile(displayName: "JOSÉ", identity: identity)))
+    }
+
+    func testLookupIgnoresSurroundingWhitespace() throws {
+        let profile = SpeakerProfile(displayName: "Sarah", identity: identity)
+        try repo.save(profile)
+        XCTAssertEqual(try repo.profile(named: "  sarah  ")?.id, profile.id)
+    }
+
+    /// Accents are typography; dropping them would be a guess about identity.
+    /// Two colleagues named Jose and José stay two people, and the enrollment
+    /// guard is what catches a genuine name clash, by voice.
+    func testAccentsDistinguishNames() throws {
+        let plain = SpeakerProfile(displayName: "Jose", identity: identity)
+        let accented = SpeakerProfile(displayName: "José", identity: identity)
+        try repo.save(plain)
+        try repo.save(accented)
+        XCTAssertEqual(try repo.profile(named: "jose")?.id, plain.id)
+        XCTAssertEqual(try repo.profile(named: "josé")?.id, accented.id)
     }
 
     func testUpdatingALinkKeepsItsOriginalCreationTime() throws {

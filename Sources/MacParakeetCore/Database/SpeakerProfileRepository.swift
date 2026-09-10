@@ -62,17 +62,15 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
     /// Case-insensitive lookup: "sarah" and "Sarah" are the same person as far
     /// as enrollment is concerned.
     ///
-    /// Uses a localized collation rather than SQLite's `NOCASE`, which folds
-    /// only the 26 ASCII letters — under it "josé" and "JOSÉ" would be two
-    /// different people, and the second enrollment would silently create a
-    /// rival profile instead of adding a sample. The unique index keeps
-    /// `NOCASE` as a backstop, so this lookup is deliberately the wider of the
-    /// two.
+    /// Queries the stored normalized key, the same one the unique index is
+    /// built on. Matching on a collation instead would let the lookup and the
+    /// constraint disagree — SQLite's `NOCASE` folds only ASCII, so two rows
+    /// that a Unicode-aware lookup considers equal could both exist, and
+    /// `fetchOne` would pick between them arbitrarily.
     public func profile(named name: String) throws -> SpeakerProfile? {
-        try dbQueue.read { db in
-            try SpeakerProfile
-                .filter(Column("displayName").collating(.localizedCaseInsensitiveCompare) == name)
-                .fetchOne(db)
+        let key = SpeakerProfile.normalizedName(for: name)
+        return try dbQueue.read { db in
+            try SpeakerProfile.filter(Column("normalizedName") == key).fetchOne(db)
         }
     }
 

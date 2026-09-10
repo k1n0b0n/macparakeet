@@ -1960,6 +1960,7 @@ public final class DatabaseManager: Sendable {
                 CREATE TABLE speaker_profiles (
                     id TEXT PRIMARY KEY NOT NULL,
                     displayName TEXT NOT NULL,
+                    normalizedName TEXT NOT NULL,
                     embeddingModelId TEXT NOT NULL,
                     aggregationProfileId TEXT NOT NULL,
                     createdAt TEXT NOT NULL,
@@ -1971,9 +1972,16 @@ public final class DatabaseManager: Sendable {
                 """)
             // Renaming a second speaker to an enrolled name must add a sample
             // to that profile, not create a rival profile with the same name.
+            //
+            // Uniqueness is on the normalized key rather than on
+            // `displayName COLLATE NOCASE`, because NOCASE folds only the 26
+            // ASCII letters: under it "José" and "JOSÉ" are distinct rows, and
+            // a lookup that folds the whole of Unicode would then match both
+            // with no defined winner. The stored key is what both sides agree
+            // on, so the constraint and the lookup cannot drift apart.
             try db.execute(sql: """
-                CREATE UNIQUE INDEX idx_speaker_profiles_name
-                ON speaker_profiles (displayName COLLATE NOCASE)
+                CREATE UNIQUE INDEX idx_speaker_profiles_normalized_name
+                ON speaker_profiles (normalizedName)
                 """)
             try db.execute(sql: """
                 CREATE TABLE speaker_profile_exemplars (
