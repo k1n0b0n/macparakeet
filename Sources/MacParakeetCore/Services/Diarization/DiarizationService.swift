@@ -6,20 +6,12 @@ public struct MacParakeetDiarizationResult: Sendable {
     public let segments: [SpeakerSegment]
     public let speakerCount: Int
     public let speakers: [SpeakerInfo]
-    /// Voice embedding per detected speaker, keyed by the same stable ids as
-    /// `speakers`. A speaker is absent when its centroid carried no usable
-    /// direction; it keeps its segments and its `SpeakerInfo` either way.
+    /// Keyed by the same stable ids as `speakers`. A speaker is absent when its
+    /// centroid carried no direction; it keeps its segments and label either way.
     public let speakerEmbeddings: [String: SpeakerEmbedding]
-    /// Total speech per speaker id, in milliseconds. Offline segments are
-    /// exclusive, so these are plain sums.
+    /// Offline segments are exclusive, so these are plain sums.
     public let speechMsBySpeaker: [String: Int]
 
-    /// - Parameters:
-    ///   - speakerEmbeddings: keyed by the same stable ids as `speakers`, and
-    ///     empty when the diarizer produced none. Callers must treat a missing
-    ///     entry as "not matchable", never as an error.
-    ///   - speechMsBySpeaker: total speech per speaker id. Offline segments are
-    ///     exclusive, so these are plain sums.
     public init(
         segments: [SpeakerSegment],
         speakerCount: Int,
@@ -34,16 +26,11 @@ public struct MacParakeetDiarizationResult: Sendable {
         self.speechMsBySpeaker = speechMsBySpeaker
     }
 
-    /// Speech for one speaker, in seconds.
+    /// Speech for one speaker, in seconds; 0 when it has none.
     ///
-    /// The single conversion point between this type's milliseconds — the unit
-    /// every other diarization value uses — and the seconds that duration gates
-    /// are expressed in. Dividing at each call site invites the one mistake
-    /// nothing would catch: a factor of a thousand turns a three-second gate
-    /// into a fifty-minute one, so every speaker silently stops qualifying and
-    /// the feature just never fires.
-    ///
-    /// Returns 0 for a speaker with no recorded speech.
+    /// The single conversion point to the unit the duration gates use. A stray
+    /// factor of a thousand turns a 3 s gate into 50 minutes, and nothing would
+    /// catch it: every speaker would just silently stop qualifying.
     public func speechSeconds(forSpeaker speakerId: String) -> Double {
         Double(speechMsBySpeaker[speakerId] ?? 0) / 1000
     }
@@ -306,17 +293,14 @@ public actor DiarizationService: DiarizationServiceProtocol {
         )
     }
 
-    /// Rekeys FluidAudio's speaker database onto our stable ids and normalizes
+    /// Rekeys FluidAudio's speaker database onto our stable ids, normalizing
     /// each centroid.
     ///
-    /// The remap is not cosmetic: FluidAudio also names its clusters `S1`, `S2`,
-    /// but numbered by cluster index, while ours are numbered by who speaks
-    /// first. Carrying the keys over untouched would silently attach one
-    /// speaker's voice to another's label.
-    ///
-    /// Speakers whose centroid fails validation are dropped from the dictionary
-    /// only. They keep their segments, their `SpeakerInfo` and their duration —
-    /// diarization output is unchanged, and they are merely unmatchable.
+    /// The remap is load-bearing: FluidAudio also uses `S1`/`S2`, numbered by
+    /// cluster index where ours are numbered by who speaks first, so copying the
+    /// keys would attach one speaker's voice to another's label. Centroids that
+    /// fail validation are dropped from this dictionary only — the speaker keeps
+    /// its segments and label, and is merely unmatchable.
     static func speakerEmbeddings(
         from speakerDatabase: [String: [Float]]?,
         idMapping: [String: String],
@@ -475,22 +459,18 @@ public actor DiarizationService: DiarizationServiceProtocol {
         return config
     }
 
-    /// The WeSpeaker embedding model behind FluidAudio's offline diarizer.
-    /// Change it only when the model itself changes: vectors from two different
-    /// models share no space and are never compared.
+    /// Change only when the model changes: vectors from two models share no
+    /// space and are never compared.
     public nonisolated static let embeddingModelId = "fluidaudio-wespeaker-256"
 
     /// Bump on any FluidAudio upgrade that could move the clustering centroid,
     /// even when the embedding model is untouched.
     private nonisolated static let pipelineRevision = "fluidaudio-0.15.6"
 
-    /// Identity of the representation `config` produces.
-    ///
-    /// The centroid depends on the clustering configuration as much as on the
-    /// model, so the aggregation half hashes every setting that can move it.
-    /// The per-run speaker-count constraint is deliberately excluded: it varies
-    /// call to call, and folding it in would make a profile enrolled under a
-    /// count hint incomparable with the same voice heard without one.
+    /// Identity of the representation `config` produces. The aggregation half
+    /// hashes every setting that can move the centroid. The per-run speaker
+    /// count is excluded on purpose: it varies call to call, and folding it in
+    /// would make a profile enrolled under a hint incomparable without one.
     /// Identity of the representation the shipping configuration produces.
     nonisolated static var defaultModelIdentity: SpeakerModelIdentity {
         modelIdentity(for: highAccuracyConfig)

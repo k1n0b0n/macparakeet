@@ -1,11 +1,8 @@
 import Foundation
 
-/// Where a voice sample was captured.
-///
-/// Embeddings only compare meaningfully inside one domain: the same person
-/// heard over a compressed conference stream and over a local microphone lands
-/// in different regions of the embedding space. Every stored sample carries its
-/// domain so matching can prefer like-for-like references.
+/// Where a voice sample was captured. The same person lands in a different
+/// region of the embedding space over a compressed stream than over a local
+/// microphone, so matching prefers like-for-like references.
 public enum SpeakerCaptureDomain: String, Sendable, Codable, CaseIterable {
     case system
     case microphone
@@ -14,23 +11,14 @@ public enum SpeakerCaptureDomain: String, Sendable, Codable, CaseIterable {
 
 /// Identifies the representation an embedding was produced in.
 ///
-/// Two identifiers rather than one, because the vector FluidAudio hands back is
-/// the VBx *clustering* centroid, not a raw model output. It therefore moves
-/// when the clustering configuration moves, even if the embedding model itself
-/// is untouched — a change that a model-only identifier would miss. See the
-/// 2026-09-09 amendment to `plans/active/2026-07-03-speaker-voiceprints.md`.
+/// Two ids, not one: FluidAudio returns the VBx clustering centroid, which
+/// moves when the clustering configuration moves even if the model does not.
 public struct SpeakerModelIdentity: Sendable, Equatable, Hashable, Codable {
-    /// The embedding model. A mismatch makes two vectors incomparable.
+    /// A mismatch makes two vectors incomparable.
     public let embeddingModelId: String
-    /// The aggregation configuration that produced the centroid. A mismatch is
-    /// comparable but less trustworthy, so callers tighten their threshold.
+    /// A mismatch is comparable but less trusted, so callers tighten tau.
     public let aggregationProfileId: String
 
-    /// - Parameters:
-    ///   - embeddingModelId: the model that produced the vector.
-    ///   - aggregationProfileId: the clustering configuration that shaped the
-    ///     centroid, so a configuration change is visible even when the model
-    ///     is unchanged.
     public init(embeddingModelId: String, aggregationProfileId: String) {
         self.embeddingModelId = embeddingModelId
         self.aggregationProfileId = aggregationProfileId
@@ -39,30 +27,23 @@ public struct SpeakerModelIdentity: Sendable, Equatable, Hashable, Codable {
 
 /// A speaker voice embedding, L2-normalized on construction.
 ///
-/// Normalization happens here and nowhere else. FluidAudio's `speakerDatabase`
-/// vectors are un-normalized centroids, and comparing them with a bare dot
-/// product scales every distance by `‖a‖·‖b‖` — which silently pushes
-/// same-speaker pairs past any calibrated threshold, with no error to observe.
-/// Worse, the centroid norm shrinks as a cluster gets noisier, so the bias is
-/// anti-correlated with signal quality. Normalizing at the boundary makes every
-/// downstream comparison correct by construction.
+/// Normalization happens here and nowhere else: FluidAudio's centroids are
+/// un-normalized, so a bare dot product scales distances by `‖a‖·‖b‖` and
+/// silently pushes same-speaker pairs past tau. The centroid norm also shrinks
+/// as a cluster gets noisier, making the bias worst where accuracy matters most.
 public struct SpeakerEmbedding: Sendable, Equatable {
-    /// WeSpeaker embedding width.
     public static let dimension = 256
-    /// Serialized size: 256 × Float32.
     public static let byteCount = dimension * MemoryLayout<Float32>.size
-    /// Below this, a vector carries no usable direction. FluidAudio emits an
-    /// all-zero centroid when a cluster's responsibility denominator is zero.
+    /// FluidAudio emits an all-zero centroid when a cluster's responsibility
+    /// denominator is zero; below this a vector carries no direction.
     static let minimumNorm: Float = 1e-6
-    /// Tolerance when re-reading a stored vector that is already normalized.
     static let normTolerance: Float = 1e-3
 
     /// Unit-length, `dimension` values.
     public let vector: [Float]
     public let identity: SpeakerModelIdentity
 
-    /// Normalizes `rawVector`. Returns `nil` for the wrong width, non-finite
-    /// values, or a vector too short to carry a direction.
+    /// Returns `nil` for the wrong width, non-finite values, or no direction.
     public init?(rawVector: [Float], identity: SpeakerModelIdentity) {
         guard rawVector.count == Self.dimension else { return nil }
         guard rawVector.allSatisfy(\.isFinite) else { return nil }
@@ -74,12 +55,9 @@ public struct SpeakerEmbedding: Sendable, Equatable {
         self.identity = identity
     }
 
-    /// Rebuilds a vector previously produced by ``data``.
-    ///
-    /// Deliberately does not re-normalize: the bytes are already unit-length, and
-    /// dividing again by a norm that floating-point rounding puts at 0.99999994
-    /// would make a store/load round trip lossy. The norm is validated instead,
-    /// so corruption is rejected rather than silently rescaled.
+    /// Rebuilds a vector produced by ``data``. Does not re-normalize — dividing
+    /// again by a norm rounding puts at 0.99999994 would make the round trip
+    /// lossy — but validates it, so corruption is rejected not rescaled.
     public init?(data: Data, identity: SpeakerModelIdentity) {
         guard data.count == Self.byteCount else { return nil }
 
@@ -108,13 +86,9 @@ public struct SpeakerEmbedding: Sendable, Equatable {
         return output
     }
 
-    /// Cosine distance in FluidAudio's convention: 0 is identical, 1 is
-    /// unrelated. Both operands are unit-length, so the dot product is the
-    /// cosine and no rescaling is needed.
-    ///
-    /// Returns `nil` when the embedding models differ, since vectors from
-    /// different models share no space. A differing aggregation profile is
-    /// comparable and left to the caller's threshold policy.
+    /// Cosine distance, FluidAudio's convention: 0 identical, 1 unrelated.
+    /// `nil` when the embedding models differ, since they share no space; a
+    /// differing aggregation profile is left to the caller's threshold policy.
     public func cosineDistance(to other: SpeakerEmbedding) -> Double? {
         guard identity.embeddingModelId == other.identity.embeddingModelId else { return nil }
 
