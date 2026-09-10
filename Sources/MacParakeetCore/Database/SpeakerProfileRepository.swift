@@ -2,40 +2,28 @@ import Foundation
 import GRDB
 
 public protocol SpeakerProfileRepositoryProtocol: Sendable {
-    /// Every enrolled voice, ordered by name.
     func profiles() throws -> [SpeakerProfile]
     func profile(id: UUID) throws -> SpeakerProfile?
-    /// Case-insensitive lookup, the one enrollment uses to decide between
-    /// adding a sample and creating a profile.
+    /// Case-insensitive; what enrollment uses to choose between adding a sample
+    /// and creating a profile.
     func profile(named name: String) throws -> SpeakerProfile?
-    /// Inserts or updates. Names are unique, so saving a second profile under
-    /// an existing name throws rather than creating a duplicate.
     func save(_ profile: SpeakerProfile) throws
-    /// A profile's samples, oldest first.
     func exemplars(profileId: UUID) throws -> [SpeakerProfileExemplar]
-    /// Every sample grouped by profile — one read for a whole matching pass.
+    /// One read for a whole matching pass.
     func exemplarsByProfile() throws -> [UUID: [SpeakerProfileExemplar]]
-    /// Adds a sample. Throws when the profile already holds one from the same
-    /// recording, which the schema forbids.
     func insert(_ exemplar: SpeakerProfileExemplar) throws
-    /// Removes one sample, leaving its profile in place. `false` when it was
-    /// already gone.
     func deleteExemplar(id: UUID) throws -> Bool
-    /// Decisions recorded for one transcript at one fingerprint. Rows from an
-    /// earlier fingerprint are deliberately invisible here.
+    /// Rows from an earlier fingerprint are deliberately invisible here.
     func links(transcriptionId: UUID, fingerprint: String) throws -> [SpeakerProfileLink]
-    /// Inserts or updates a decision, preserving its original creation time.
     func save(_ link: SpeakerProfileLink) throws
-    /// Removes a profile with its samples and decisions, in one transaction.
+    /// Removes a profile with its samples and decisions in one transaction.
     /// Transcripts and labels already applied are untouched.
     func deleteProfile(id: UUID) throws -> Bool
-    /// Forgets every voice. Same guarantees as `deleteProfile`, applied at once.
     func deleteAllProfiles() throws
 }
 
-/// Stores enrolled voices. Persistence only: thresholds, gates and matching
-/// policy live in the matcher, and nothing here decides whether two voices are
-/// the same person.
+/// Stores enrolled voices. Persistence only — thresholds and matching policy
+/// live in the matcher.
 public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
     private let dbQueue: DatabaseQueue
 
@@ -59,14 +47,10 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
         }
     }
 
-    /// Case-insensitive lookup: "sarah" and "Sarah" are the same person as far
-    /// as enrollment is concerned.
-    ///
-    /// Queries the stored normalized key, the same one the unique index is
-    /// built on. Matching on a collation instead would let the lookup and the
-    /// constraint disagree — SQLite's `NOCASE` folds only ASCII, so two rows
-    /// that a Unicode-aware lookup considers equal could both exist, and
-    /// `fetchOne` would pick between them arbitrarily.
+    /// Queries the stored normalized key, the same one the unique index uses.
+    /// A collation here instead would let lookup and constraint disagree:
+    /// `NOCASE` folds only ASCII, so two rows a Unicode-aware lookup considers
+    /// equal could both exist and `fetchOne` would pick arbitrarily.
     public func profile(named name: String) throws -> SpeakerProfile? {
         let key = SpeakerProfile.normalizedName(for: name)
         return try dbQueue.read { db in
@@ -91,8 +75,7 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
         }
     }
 
-    /// Every exemplar, grouped by profile — one read for a whole matching pass
-    /// rather than one per profile.
+    /// One read for a whole matching pass rather than one per profile.
     public func exemplarsByProfile() throws -> [UUID: [SpeakerProfileExemplar]] {
         let all = try dbQueue.read { db in
             try SpeakerProfileExemplar.order(Column("createdAt")).fetchAll(db)
@@ -123,13 +106,9 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
         }
     }
 
-    /// Upserts a decision, keeping the original `createdAt`.
-    ///
-    /// A link is saved again whenever its status moves — suggested, then
-    /// confirmed or dismissed — and each caller builds a fresh value. Without
-    /// this, the moment the suggestion was first made would be overwritten by
-    /// the moment the user answered, and the journal would lose the interval
-    /// between them.
+    /// Upserts a decision, keeping the original `createdAt`: status moves from
+    /// suggested to confirmed or dismissed, and each caller builds a fresh
+    /// value, so otherwise the offer time is overwritten by the answer time.
     public func save(_ link: SpeakerProfileLink) throws {
         try dbQueue.write { db in
             var link = link
@@ -147,11 +126,8 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
 
     // MARK: Deletion
 
-    /// Removes a profile and everything it owns in one transaction.
-    ///
     /// Exemplars and links go with it through their cascades; transcripts and
-    /// any label already applied are untouched, because deleting a voiceprint
-    /// must not rewrite the user's history.
+    /// any label already applied are untouched.
     public func deleteProfile(id: UUID) throws -> Bool {
         try dbQueue.write { db in
             try SpeakerProfile.deleteOne(db, key: id)

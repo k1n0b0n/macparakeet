@@ -1,39 +1,27 @@
 import Foundation
 import GRDB
 
-/// A voice the user has explicitly enrolled, so the same person can be
-/// recognized across recordings.
+/// A voice the user has explicitly enrolled.
 ///
-/// Deliberately holds no centroid column: scoring takes the minimum distance
-/// over the profile's exemplars, which preserves per-domain modes, so a derived
-/// aggregate would be an unused cache with its own coherency bugs.
+/// No centroid column: scoring takes the minimum distance over the exemplars,
+/// which preserves per-domain modes, so an aggregate would be an unused cache.
 public struct SpeakerProfile: Codable, Identifiable, Sendable, Equatable {
     public var id: UUID
     /// As the user typed it. Display only — never compared directly.
     public var displayName: String
-    /// The key uniqueness and lookup both use, derived from `displayName`.
-    ///
-    /// Kept as a column rather than computed in a query so that the database
-    /// constraint and the Swift lookup can never disagree about what counts as
-    /// the same name. Set it through ``normalizedName(for:)``.
+    /// The key both uniqueness and lookup use, so the database constraint and
+    /// the Swift lookup cannot disagree on what counts as the same name.
     public var normalizedName: String
     public var embeddingModelId: String
     public var aggregationProfileId: String
     public var createdAt: Date
     public var updatedAt: Date
-    /// Last time this profile was actually suggested for a speaker.
     public var lastMatchedAt: Date?
-    /// Last time it was scored at all, matched or not, with its best distance.
-    /// The pair is what lets the admin screen answer "why does this profile
-    /// never match?" with a number instead of a shrug.
+    /// Scored at all, matched or not: what answers "why does this profile never
+    /// match?" with a number.
     public var lastEvaluatedAt: Date?
     public var lastEvaluatedDistance: Double?
 
-    /// - Parameters:
-    ///   - displayName: unique case-insensitively; enrollment looks a profile
-    ///     up by this name before deciding to create one.
-    ///   - identity: the representation this profile's samples live in. Samples
-    ///     from another embedding model are never compared against it.
     public init(
         id: UUID = UUID(),
         displayName: String,
@@ -63,14 +51,9 @@ public struct SpeakerProfile: Codable, Identifiable, Sendable, Equatable {
         )
     }
 
-    /// The comparison key for a display name: trimmed, then case-folded across
-    /// the whole of Unicode.
-    ///
-    /// Accents are deliberately kept. Folding them too would make "Jose" and
-    /// "José" one person, which is a guess about identity rather than about
-    /// typography — and the wrong guess merges two colleagues silently. When
-    /// two people really do share a name, the enrollment guard catches it by
-    /// voice instead.
+    /// Trimmed, then case-folded across all of Unicode. Accents are kept:
+    /// folding them would decide that "Jose" and "José" are one person, which
+    /// is a guess about identity, not typography.
     public static func normalizedName(for displayName: String) -> String {
         displayName
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -84,10 +67,9 @@ extension SpeakerProfile: FetchableRecord, PersistableRecord {
 
 /// One recording's worth of voice evidence for a profile.
 ///
-/// At most one per profile per recording, enforced by a unique constraint
-/// rather than by code: offline segment embeddings within a recording all
-/// derive from the same cluster centroid, so storing several would inflate the
-/// sample count without adding any diversity.
+/// At most one per profile per recording, enforced by the schema: segment
+/// embeddings within a recording all derive from the same centroid, so several
+/// would inflate the sample count without adding diversity.
 public struct SpeakerProfileExemplar: Codable, Identifiable, Sendable, Equatable {
     public enum Origin: String, Codable, Sendable {
         /// The user named this speaker themselves.
@@ -98,27 +80,20 @@ public struct SpeakerProfileExemplar: Codable, Identifiable, Sendable, Equatable
 
     public var id: UUID
     public var profileId: UUID
-    /// The embedding, 1024 bytes of little-endian Float32. Stored as a blob
-    /// rather than JSON: SQLite validates the length, and an accidental
-    /// serialization yields opaque bytes instead of a readable voiceprint.
+    /// 1024 bytes of little-endian Float32. A blob rather than JSON so SQLite
+    /// validates the length and an accidental serialization stays opaque.
     public var vector: Data
     public var speechSeconds: Double
     public var captureDomain: SpeakerCaptureDomain
     public var origin: Origin
     public var embeddingModelId: String
     public var aggregationProfileId: String
-    /// Cleared rather than cascaded when the transcript goes: the user enrolled
-    /// a person, not a recording, so tidying the library must not quietly
-    /// degrade a profile.
+    /// Cleared rather than cascaded: the user enrolled a person, not a
+    /// recording, so tidying the library must not degrade a profile.
     public var sourceTranscriptionId: UUID?
     public var sourceSpeakerId: String?
     public var createdAt: Date
 
-    /// - Parameters:
-    ///   - embedding: stored as bytes; its model identity is copied alongside
-    ///     so a later upgrade can tell which representation this sample is in.
-    ///   - sourceTranscriptionId: the recording it came from, cleared rather
-    ///     than cascaded when that recording is deleted.
     public init(
         id: UUID = UUID(),
         profileId: UUID,
@@ -150,9 +125,8 @@ public struct SpeakerProfileExemplar: Codable, Identifiable, Sendable, Equatable
         )
     }
 
-    /// Decodes the stored vector. `nil` means the blob no longer satisfies the
-    /// embedding invariants, in which case the exemplar cannot take part in
-    /// matching.
+    /// `nil` when the blob no longer satisfies the embedding invariants, in
+    /// which case this exemplar cannot take part in matching.
     public var embedding: SpeakerEmbedding? {
         SpeakerEmbedding(data: vector, identity: identity)
     }
@@ -164,11 +138,9 @@ extension SpeakerProfileExemplar: FetchableRecord, PersistableRecord {
 
 /// What was decided about one detected speaker in one transcript.
 ///
-/// Carries no label: the label lives in `speaker_corrections`, which already
-/// owns provenance and undo. This table exists for the three things that layer
-/// cannot express — that a dismissal must not be repeated, that a profile has
-/// already taken a sample from this recording, and that everything disappears
-/// with its profile.
+/// Carries no label — that lives in `speaker_corrections` with provenance and
+/// undo. This exists for what that layer cannot express: that a dismissal must
+/// not repeat, and that everything disappears with its profile.
 public struct SpeakerProfileLink: Codable, Sendable, Equatable {
     public enum Status: String, Codable, Sendable {
         case suggested
@@ -177,9 +149,8 @@ public struct SpeakerProfileLink: Codable, Sendable, Equatable {
     }
 
     public var transcriptionId: UUID
-    /// The diarizer's id for this run ("S1", "system:S1"). Positional, which is
-    /// exactly why rows are fingerprint-scoped: after re-diarization the same
-    /// id can mean a different person.
+    /// Positional ("S1", "system:S1"), which is why rows are fingerprint-scoped:
+    /// after re-diarization the same id can mean a different person.
     public var speakerId: String
     public var transcriptFingerprint: String
     public var profileId: UUID
@@ -189,11 +160,6 @@ public struct SpeakerProfileLink: Codable, Sendable, Equatable {
     public var createdAt: Date
     public var updatedAt: Date
 
-    /// - Parameters:
-    ///   - speakerId: the diarizer's positional id, meaningful only together
-    ///     with `transcriptFingerprint`.
-    ///   - distance: what the decision was based on, kept so calibration can
-    ///     read it back.
     public init(
         transcriptionId: UUID,
         speakerId: String,

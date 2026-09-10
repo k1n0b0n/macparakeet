@@ -1951,10 +1951,9 @@ public final class DatabaseManager: Sendable {
             }
         }
 
-        // v0.39 — Persistent speaker profiles (voiceprints). Enrolled voices
-        // live here so the same person can be recognized across recordings.
-        // Biometric data: every row is local-only, excluded from exports, and
-        // removable. See plans/active/2026-07-03-speaker-voiceprints.md.
+        // v0.39 — Persistent speaker profiles (voiceprints). Biometric data:
+        // local-only, excluded from exports, removable.
+        // See plans/active/2026-07-03-speaker-voiceprints.md.
         migrator.registerMigration("v0.39-speaker-voiceprints") { db in
             try db.execute(sql: """
                 CREATE TABLE speaker_profiles (
@@ -1970,15 +1969,9 @@ public final class DatabaseManager: Sendable {
                     lastEvaluatedDistance REAL
                 )
                 """)
-            // Renaming a second speaker to an enrolled name must add a sample
-            // to that profile, not create a rival profile with the same name.
-            //
-            // Uniqueness is on the normalized key rather than on
-            // `displayName COLLATE NOCASE`, because NOCASE folds only the 26
-            // ASCII letters: under it "José" and "JOSÉ" are distinct rows, and
-            // a lookup that folds the whole of Unicode would then match both
-            // with no defined winner. The stored key is what both sides agree
-            // on, so the constraint and the lookup cannot drift apart.
+            // On the normalized key, not `displayName COLLATE NOCASE`: NOCASE
+            // folds only ASCII, so "José" and "JOSÉ" would be distinct rows
+            // that a Unicode-aware lookup then matches both of.
             try db.execute(sql: """
                 CREATE UNIQUE INDEX idx_speaker_profiles_normalized_name
                 ON speaker_profiles (normalizedName)
@@ -2009,10 +2002,9 @@ public final class DatabaseManager: Sendable {
                 CREATE INDEX idx_speaker_profile_exemplars_profile
                 ON speaker_profile_exemplars (profileId, createdAt)
                 """)
-            // Suggestion decisions, scoped by fingerprint like
-            // speaker_corrections: once a transcript is re-diarized the old
-            // rows no longer apply, so a stale dismissal cannot permanently
-            // suppress a legitimate suggestion.
+            // Scoped by fingerprint like speaker_corrections: after
+            // re-diarization the old rows no longer apply, so a stale dismissal
+            // cannot permanently suppress a legitimate suggestion.
             try db.execute(sql: """
                 CREATE TABLE speaker_profile_links (
                     transcriptionId TEXT NOT NULL
