@@ -35,6 +35,8 @@ public struct SpeakerProfileCandidate: Sendable, Equatable {
 
     public let profileId: UUID
     public let displayName: String
+    /// Most relevant first: only the first `maxReferencesPerProfile` are scored,
+    /// so a caller passing oldest-first would hide its newest samples.
     public let references: [Reference]
 
     public init(profileId: UUID, displayName: String, references: [Reference]) {
