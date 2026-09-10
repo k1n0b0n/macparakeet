@@ -22,6 +22,9 @@ final class AppEnvironment {
     let knowledgeLayerMutator: KnowledgeLayerMutationService
     let speakerAttributionReader: SpeakerAttributionReadService
     let speakerCorrectionService: SpeakerCorrectionService
+    let speakerProfileRepo: SpeakerProfileRepository
+    let speakerMatchJournalRepo: SpeakerMatchJournalRepository
+    let speakerVoiceprintService: SpeakerVoiceprintService
     let customWordRepo: CustomWordRepository
     let snippetRepo: TextSnippetRepository
     let chatConversationRepo: ChatConversationRepository
@@ -87,6 +90,13 @@ final class AppEnvironment {
         knowledgeLayerMutator = KnowledgeLayerMutationService(dbQueue: databaseManager.dbQueue)
         speakerAttributionReader = SpeakerAttributionReadService(dbQueue: databaseManager.dbQueue)
         speakerCorrectionService = SpeakerCorrectionService(dbQueue: databaseManager.dbQueue)
+        speakerProfileRepo = SpeakerProfileRepository(dbQueue: databaseManager.dbQueue)
+        speakerMatchJournalRepo = SpeakerMatchJournalRepository(dbQueue: databaseManager.dbQueue)
+        speakerVoiceprintService = SpeakerVoiceprintService(
+            profiles: speakerProfileRepo,
+            journal: speakerMatchJournalRepo,
+            isEnabled: { UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled() }
+        )
         customWordRepo = CustomWordRepository(dbQueue: databaseManager.dbQueue)
         snippetRepo = TextSnippetRepository(dbQueue: databaseManager.dbQueue)
         chatConversationRepo = ChatConversationRepository(dbQueue: databaseManager.dbQueue)
@@ -419,7 +429,8 @@ final class AppEnvironment {
             podcastSearchResolver: PodcastQueryResolver(),
             podcastAudioFetcher: PodcastAudioDownloader(),
             diarizationService: diarizationService,
-            meetingArtifactStore: meetingArtifactStore
+            meetingArtifactStore: meetingArtifactStore,
+            speakerVoiceprints: speakerVoiceprintService
         )
 
         meetingRecordingRecoveryService = MeetingRecordingRecoveryService(
