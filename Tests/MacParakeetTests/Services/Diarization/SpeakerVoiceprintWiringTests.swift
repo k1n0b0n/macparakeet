@@ -172,6 +172,9 @@ final class SpeakerVoiceprintWiringTests: XCTestCase {
     func testThePreferenceRequiresMeetingSpeakerDetection() {
         let defaults = UserDefaults(suiteName: "voiceprint-wiring-\(UUID().uuidString)")!
         defaults.set(true, forKey: UserDefaultsAppRuntimePreferences.rememberSpeakersKey)
+        defaults.set(
+            Date(), forKey: UserDefaultsAppRuntimePreferences.voiceprintConsentAcknowledgedAtKey
+        )
 
         defaults.set(false, forKey: UserDefaultsAppRuntimePreferences.meetingSpeakerDiarizationKey)
         XCTAssertFalse(UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(defaults: defaults))
