@@ -1670,15 +1670,10 @@ public actor TranscriptionService: SpeakerConfiguredRetranscriptionService, Audi
         guard let speakerVoiceprints, let systemDiarization else { return }
         guard !systemDiarization.speakerEmbeddings.isEmpty else { return }
 
-        let observations = systemDiarization.speakers.compactMap { speaker -> SpeakerClusterObservation? in
-            guard let embedding = systemDiarization.speakerEmbeddings[speaker.id] else { return nil }
-            return SpeakerClusterObservation(
-                speakerId: speaker.id,
-                embedding: embedding,
-                speechSeconds: Double(systemDiarization.speechMsBySpeaker[speaker.id] ?? 0) / 1000,
-                captureDomain: .system
-            )
-        }
+        let observations = Self.voiceprintObservations(
+            systemDiarization: systemDiarization,
+            persistedSpeakers: transcription.speakers ?? []
+        )
         guard !observations.isEmpty else { return }
 
         do {
@@ -1693,6 +1688,31 @@ public actor TranscriptionService: SpeakerConfiguredRetranscriptionService, Audi
         } catch {
             logger.error(
                 "meeting_voiceprint_failed error=\(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    /// Observations for the speakers the saved transcript actually contains.
+    ///
+    /// Scoped to the persisted speakers, not the diarizer's full output: the
+    /// finalizer drops any cluster whose segments won no words, so scoring the
+    /// raw list would write a suggestion keyed to a speaker the transcript does
+    /// not have — one the UI could never resolve.
+    ///
+    /// Durations arrive in milliseconds and the matching gates are in seconds.
+    static func voiceprintObservations(
+        systemDiarization: MeetingTranscriptFinalizer.SystemDiarization,
+        persistedSpeakers: [SpeakerInfo]
+    ) -> [SpeakerClusterObservation] {
+        let persistedIDs = Set(persistedSpeakers.map(\.id))
+        return systemDiarization.speakers.compactMap { speaker in
+            guard persistedIDs.contains(speaker.id) else { return nil }
+            guard let embedding = systemDiarization.speakerEmbeddings[speaker.id] else { return nil }
+            return SpeakerClusterObservation(
+                speakerId: speaker.id,
+                embedding: embedding,
+                speechSeconds: Double(systemDiarization.speechMsBySpeaker[speaker.id] ?? 0) / 1000,
+                captureDomain: .system
             )
         }
     }

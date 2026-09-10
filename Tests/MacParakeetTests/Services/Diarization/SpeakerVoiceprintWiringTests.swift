@@ -75,6 +75,69 @@ final class SpeakerVoiceprintWiringTests: XCTestCase {
         )
     }
 
+    // MARK: Which speakers are scored
+
+    /// The finalizer drops any cluster whose segments won no words, and only
+    /// the surviving list is persisted. Scoring the diarizer's full output
+    /// would write a suggestion keyed to a speaker the transcript does not
+    /// have — one the UI could never resolve.
+    func testOnlyPersistedSpeakersAreScored() {
+        let diarization = MeetingTranscriptFinalizer.SystemDiarization(
+            speakers: [
+                SpeakerInfo(id: "system:S1", label: "Others 1"),
+                SpeakerInfo(id: "system:S2", label: "Others 2"),
+            ],
+            segments: [],
+            speakerEmbeddings: [
+                "system:S1": embedding(voice: 0),
+                "system:S2": embedding(voice: 1),
+            ],
+            speechMsBySpeaker: ["system:S1": 30_000, "system:S2": 30_000]
+        )
+
+        let observations = TranscriptionService.voiceprintObservations(
+            systemDiarization: diarization,
+            // S2 won no words, so the finalizer left it out of the transcript.
+            persistedSpeakers: [SpeakerInfo(id: "system:S1", label: "Others 1")]
+        )
+
+        XCTAssertEqual(observations.map(\.speakerId), ["system:S1"])
+    }
+
+    func testASpeakerWithoutAnEmbeddingIsSkipped() {
+        let diarization = MeetingTranscriptFinalizer.SystemDiarization(
+            speakers: [SpeakerInfo(id: "system:S1", label: "Others 1")],
+            segments: [],
+            speakerEmbeddings: [:],
+            speechMsBySpeaker: ["system:S1": 30_000]
+        )
+
+        XCTAssertTrue(
+            TranscriptionService.voiceprintObservations(
+                systemDiarization: diarization,
+                persistedSpeakers: [SpeakerInfo(id: "system:S1", label: "Others 1")]
+            ).isEmpty
+        )
+    }
+
+    func testObservationsConvertDurationsToSeconds() throws {
+        let diarization = MeetingTranscriptFinalizer.SystemDiarization(
+            speakers: [SpeakerInfo(id: "system:S1", label: "Others 1")],
+            segments: [],
+            speakerEmbeddings: ["system:S1": embedding(voice: 0)],
+            speechMsBySpeaker: ["system:S1": 12_500]
+        )
+
+        let observation = try XCTUnwrap(
+            TranscriptionService.voiceprintObservations(
+                systemDiarization: diarization,
+                persistedSpeakers: [SpeakerInfo(id: "system:S1", label: "Others 1")]
+            ).first
+        )
+        XCTAssertEqual(observation.speechSeconds, 12.5, accuracy: 1e-9)
+        XCTAssertEqual(observation.captureDomain, .system)
+    }
+
     // MARK: The gate
 
     func testNothingIsWrittenWhileTheFeatureIsOff() async throws {
