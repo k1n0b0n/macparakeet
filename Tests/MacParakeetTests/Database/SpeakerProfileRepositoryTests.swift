@@ -77,9 +77,12 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
                         INSERT INTO speaker_profile_exemplars
                         (id, profileId, vector, speechSeconds, captureDomain, origin,
                          embeddingModelId, aggregationProfileId, createdAt)
-                        VALUES (?, ?, ?, ?, 'system', 'manualEnrollment', 'm', 'a', ?)
+                        VALUES (?, ?, ?, ?, 'system', 'manualEnrollment', ?, ?, ?)
                         """,
-                    arguments: [UUID(), profile.id, Data(repeating: 0, count: 1020), 20.0, Date()]
+                    arguments: [
+                        UUID(), profile.id, Data(repeating: 0, count: 1020), 20.0,
+                        identity.embeddingModelId, identity.aggregationProfileId, Date(),
+                    ]
                 )
             }
         )
@@ -102,11 +105,12 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
                             INSERT INTO speaker_profile_exemplars
                             (id, profileId, vector, speechSeconds, captureDomain, origin,
                              embeddingModelId, aggregationProfileId, createdAt)
-                            VALUES (?, ?, ?, ?, ?, ?, 'm', 'a', ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                         arguments: [
                             UUID(), profile.id, makeEmbedding(index: 1).data, 20.0,
-                            domain, origin, Date(),
+                            domain, origin,
+                            identity.embeddingModelId, identity.aggregationProfileId, Date(),
                         ]
                     )
                 }
