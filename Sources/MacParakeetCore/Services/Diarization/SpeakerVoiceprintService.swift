@@ -20,12 +20,26 @@ public enum SpeakerProfileEnrollment: Sendable, Equatable {
 }
 
 public protocol SpeakerVoiceprintServicing: Sendable {
-    /// Names worth proposing. Applies nothing, and does no work when off.
+    /// Names worth proposing, and the voices this run leaves available for
+    /// enrollment. Applies nothing, and does no work when off.
     func evaluate(
         transcriptionId: UUID,
         fingerprint: TranscriptFingerprint,
         clusters: [SpeakerClusterObservation]
     ) async throws -> [SpeakerVoiceprintSuggestion]
+
+    /// The voice still available for this speaker, or `nil` when the window has
+    /// lapsed, the cluster was too short, or the feature was off at capture.
+    /// This is what makes "remember this voice" possible after the fact.
+    func enrollmentCandidate(
+        transcriptionId: UUID,
+        speakerId: String,
+        fingerprint: TranscriptFingerprint
+    ) async throws -> SpeakerClusterObservation?
+
+    /// Drops candidates past their window. Reads and writes prune too; this
+    /// covers the user who stops recording and stops naming.
+    func pruneExpiredCandidates() async throws
 
     /// Creates the profile or adds a sample. Refuses short clusters, and asks
     /// rather than merges when the name is taken by a voice that differs.
@@ -33,6 +47,7 @@ public protocol SpeakerVoiceprintServicing: Sendable {
         displayName: String,
         observation: SpeakerClusterObservation,
         transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint,
         allowMergeIntoExistingName: Bool
     ) async throws -> SpeakerProfileEnrollment
 
@@ -59,22 +74,28 @@ public protocol SpeakerVoiceprintServicing: Sendable {
 /// GRDB already serializes through the database queue.
 public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchecked Sendable {
     private let profiles: SpeakerProfileRepositoryProtocol
+    private let candidates: SpeakerEmbeddingCandidateRepositoryProtocol
     private let journal: SpeakerMatchJournalRepositoryProtocol
     private let policy: SpeakerMatchPolicy
+    private let candidateRetention: TimeInterval
     /// Read per call, so turning the preference off takes effect immediately.
     private let isEnabled: @Sendable () -> Bool
     private let now: @Sendable () -> Date
 
     public init(
         profiles: SpeakerProfileRepositoryProtocol,
+        candidates: SpeakerEmbeddingCandidateRepositoryProtocol,
         journal: SpeakerMatchJournalRepositoryProtocol,
         policy: SpeakerMatchPolicy = .v1,
+        candidateRetention: TimeInterval = SpeakerEmbeddingCandidateRepository.defaultRetention,
         isEnabled: @escaping @Sendable () -> Bool,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.profiles = profiles
+        self.candidates = candidates
         self.journal = journal
         self.policy = policy
+        self.candidateRetention = candidateRetention
         self.isEnabled = isEnabled
         self.now = now
     }
@@ -90,7 +111,12 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
     ) async throws -> [SpeakerVoiceprintSuggestion] {
         guard isEnabled(), !clusters.isEmpty else { return [] }
 
-        let candidates = try candidates()
+        // Ahead of every matching early return: the run that matters most for
+        // enrollment is the first one, when no profile exists yet and there is
+        // nothing to score against.
+        try retainCandidates(clusters, transcriptionId: transcriptionId, fingerprint: fingerprint)
+
+        let candidates = try profileCandidates()
         guard !candidates.isEmpty else { return [] }
 
         // Both terminal statuses are excluded, not just refusals: rescoring a
@@ -116,13 +142,36 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
 
     // MARK: Enrollment
 
+    /// Gated on the preference like everything else: a candidate captured while
+    /// the feature was on must not stay reachable after it is turned off.
+    public func enrollmentCandidate(
+        transcriptionId: UUID,
+        speakerId: String,
+        fingerprint: TranscriptFingerprint
+    ) async throws -> SpeakerClusterObservation? {
+        guard isEnabled() else { return nil }
+        return try candidates.candidate(
+            transcriptionId: transcriptionId,
+            speakerId: speakerId,
+            fingerprint: fingerprint.rawValue,
+            now: now()
+        )?.observation
+    }
+
+    public func pruneExpiredCandidates() async throws {
+        try candidates.pruneExpired(now: now())
+    }
+
     /// The pollution guard lives here, not in the matcher: naming a speaker is
     /// a user action that bypasses every threshold, so two colleagues called
     /// Sarah, or one misclick, would fuse two voices with no way back.
+    ///
+    /// On success the candidate is dropped: its vector now lives in the profile.
     public func enroll(
         displayName: String,
         observation: SpeakerClusterObservation,
         transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint,
         allowMergeIntoExistingName: Bool
     ) async throws -> SpeakerProfileEnrollment {
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -138,6 +187,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 existing,
                 observation: observation,
                 transcriptionId: transcriptionId,
+                fingerprint: fingerprint,
                 allowMergeIntoExistingName: allowMergeIntoExistingName
             )
         }
@@ -163,6 +213,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 winner,
                 observation: observation,
                 transcriptionId: transcriptionId,
+                fingerprint: fingerprint,
                 allowMergeIntoExistingName: allowMergeIntoExistingName
             )
         }
@@ -172,6 +223,11 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
             observation: observation,
             origin: .manualEnrollment,
             transcriptionId: transcriptionId
+        )
+        try consumeCandidate(
+            transcriptionId: transcriptionId,
+            speakerId: observation.speakerId,
+            fingerprint: fingerprint
         )
         return .created(profile)
     }
@@ -183,6 +239,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         _ profile: SpeakerProfile,
         observation: SpeakerClusterObservation,
         transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint,
         allowMergeIntoExistingName: Bool
     ) throws -> SpeakerProfileEnrollment {
         var profile = profile
@@ -222,6 +279,11 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         case .rejectedAlreadySampled:
             return .alreadySampled(profile)
         case .inserted, .insertedEvicting:
+            try consumeCandidate(
+                transcriptionId: transcriptionId,
+                speakerId: observation.speakerId,
+                fingerprint: fingerprint
+            )
             profile.updatedAt = now()
             try profiles.save(profile)
             return .addedExemplar(profile)
@@ -267,6 +329,11 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 origin: .confirmedSuggestion,
                 transcriptionId: transcriptionId
             )
+            try consumeCandidate(
+                transcriptionId: transcriptionId,
+                speakerId: suggestion.speakerId,
+                fingerprint: fingerprint
+            )
         }
 
         profile.lastMatchedAt = now()
@@ -296,7 +363,48 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
 
     // MARK: Internals
 
-    private func candidates() throws -> [SpeakerProfileCandidate] {
+    /// Only clusters the enrollment gate would accept are retained. A vector
+    /// below it can never become an exemplar, so keeping it would be biometric
+    /// data stored for an offer the user will never be shown.
+    private func retainCandidates(
+        _ clusters: [SpeakerClusterObservation],
+        transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint
+    ) throws {
+        let enrollable = clusters.filter { $0.speechSeconds >= policy.minSpeechSecondsToEnroll }
+        guard !enrollable.isEmpty else { return }
+
+        let captured = now()
+        try candidates.upsert(
+            enrollable.map { cluster in
+                SpeakerEmbeddingCandidate(
+                    transcriptionId: transcriptionId,
+                    speakerId: cluster.speakerId,
+                    transcriptFingerprint: fingerprint.rawValue,
+                    embedding: cluster.embedding,
+                    speechSeconds: cluster.speechSeconds,
+                    captureDomain: cluster.captureDomain,
+                    createdAt: captured,
+                    expiresAt: captured.addingTimeInterval(candidateRetention)
+                )
+            },
+            now: captured
+        )
+    }
+
+    private func consumeCandidate(
+        transcriptionId: UUID,
+        speakerId: String,
+        fingerprint: TranscriptFingerprint
+    ) throws {
+        try candidates.delete(
+            transcriptionId: transcriptionId,
+            speakerId: speakerId,
+            fingerprint: fingerprint.rawValue
+        )
+    }
+
+    private func profileCandidates() throws -> [SpeakerProfileCandidate] {
         let stored = try profiles.profiles()
         guard !stored.isEmpty else { return [] }
 

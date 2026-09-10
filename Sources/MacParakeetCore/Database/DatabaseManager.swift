@@ -2071,6 +2071,40 @@ public final class DatabaseManager: Sendable {
                 """)
         }
 
+        // v0.41 — Enrollment needs a vector the pipeline has already discarded:
+        // the user names a speaker days after the meeting. Written only while
+        // `rememberSpeakers` is on, never read by the matcher, promotable to an
+        // exemplar, and expiring on their own. See the 2026-09-10 amendment in
+        // plans/active/2026-07-03-speaker-voiceprints.md.
+        migrator.registerMigration("v0.41-speaker-embedding-candidates") { db in
+            try db.execute(sql: """
+                CREATE TABLE speaker_embedding_candidates (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    transcriptionId TEXT NOT NULL
+                        REFERENCES transcriptions(id) ON DELETE CASCADE,
+                    speakerId TEXT NOT NULL,
+                    transcriptFingerprint TEXT NOT NULL,
+                    vector BLOB NOT NULL CHECK (length(vector) = 1024),
+                    speechSeconds REAL NOT NULL CHECK (speechSeconds > 0),
+                    captureDomain TEXT NOT NULL CHECK (
+                        captureDomain IN ('system', 'microphone', 'file')
+                    ),
+                    embeddingModelId TEXT NOT NULL,
+                    aggregationProfileId TEXT NOT NULL,
+                    createdAt TEXT NOT NULL,
+                    -- Stored per row, not derived from a constant at read time:
+                    -- raising the window later must not resurrect vectors that
+                    -- were promised a shorter life.
+                    expiresAt TEXT NOT NULL,
+                    UNIQUE (transcriptionId, speakerId, transcriptFingerprint)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_speaker_embedding_candidates_expiry
+                ON speaker_embedding_candidates (expiresAt)
+                """)
+        }
+
         return migrator
     }
 

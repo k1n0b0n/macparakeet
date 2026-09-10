@@ -7,6 +7,7 @@ import GRDB
 final class SpeakerVoiceprintWiringTests: XCTestCase {
     private var dbQueue: DatabaseQueue!
     private var profiles: SpeakerProfileRepository!
+    private var candidates: SpeakerEmbeddingCandidateRepository!
     private var journal: SpeakerMatchJournalRepository!
     private var transcriptions: TranscriptionRepository!
 
@@ -20,6 +21,7 @@ final class SpeakerVoiceprintWiringTests: XCTestCase {
         let manager = try DatabaseManager()
         dbQueue = manager.dbQueue
         profiles = SpeakerProfileRepository(dbQueue: manager.dbQueue)
+        candidates = SpeakerEmbeddingCandidateRepository(dbQueue: manager.dbQueue)
         journal = SpeakerMatchJournalRepository(dbQueue: manager.dbQueue)
         transcriptions = TranscriptionRepository(dbQueue: manager.dbQueue)
     }
@@ -147,6 +149,7 @@ final class SpeakerVoiceprintWiringTests: XCTestCase {
 
         let off = SpeakerVoiceprintService(
             profiles: profiles,
+            candidates: candidates,
             journal: journal,
             isEnabled: { false }
         )
@@ -192,7 +195,12 @@ final class SpeakerVoiceprintWiringTests: XCTestCase {
     // MARK: Helpers
 
     private func service() -> SpeakerVoiceprintService {
-        SpeakerVoiceprintService(profiles: profiles, journal: journal, isEnabled: { true })
+        SpeakerVoiceprintService(
+            profiles: profiles,
+            candidates: candidates,
+            journal: journal,
+            isEnabled: { true }
+        )
     }
 
     private func embedding(voice: Int) -> SpeakerEmbedding {
@@ -226,6 +234,7 @@ final class SpeakerVoiceprintWiringTests: XCTestCase {
             displayName: name,
             observation: observation(id: "system:S1", voice: voice, speechMs: 30_000),
             transcriptionId: transcriptionId,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
         guard case .created(let profile) = result else {

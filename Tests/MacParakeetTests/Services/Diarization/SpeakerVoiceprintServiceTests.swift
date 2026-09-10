@@ -5,6 +5,7 @@ import GRDB
 final class SpeakerVoiceprintServiceTests: XCTestCase {
     private var dbQueue: DatabaseQueue!
     private var profiles: SpeakerProfileRepository!
+    private var candidates: SpeakerEmbeddingCandidateRepository!
     private var journal: SpeakerMatchJournalRepository!
     private var transcriptions: TranscriptionRepository!
     private var enabled = true
@@ -19,6 +20,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         let manager = try DatabaseManager()
         dbQueue = manager.dbQueue
         profiles = SpeakerProfileRepository(dbQueue: manager.dbQueue)
+        candidates = SpeakerEmbeddingCandidateRepository(dbQueue: manager.dbQueue)
         journal = SpeakerMatchJournalRepository(dbQueue: manager.dbQueue)
         transcriptions = TranscriptionRepository(dbQueue: manager.dbQueue)
         enabled = true
@@ -225,6 +227,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "  Sarah  ",
             observation: cluster("S1", voice: 0, degrees: 0),
             transcriptionId: recording.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
 
@@ -243,6 +246,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "Sarah",
             observation: cluster("S1", voice: 0, degrees: 0, speechSeconds: 12),
             transcriptionId: recording.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
 
@@ -261,6 +265,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "sarah",
             observation: cluster("S1", voice: 0, degrees: 14.1),
             transcriptionId: second.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
 
@@ -282,6 +287,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "Sarah",
             observation: cluster("S1", voice: 4, degrees: 0),
             transcriptionId: second.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
 
@@ -302,6 +308,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "Sarah",
             observation: cluster("S1", voice: 4, degrees: 0),
             transcriptionId: second.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: true
         )
 
@@ -319,6 +326,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "Sarah",
             observation: cluster("S2", voice: 0, degrees: 14.1),
             transcriptionId: recording.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
 
@@ -371,6 +379,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "Sarah",
             observation: observation,
             transcriptionId: second.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
 
@@ -405,6 +414,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "Sarah",
             observation: observation,
             transcriptionId: second.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: true
         )
 
@@ -421,6 +431,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
                 displayName: blank,
                 observation: cluster("S1", voice: 0, degrees: 0),
                 transcriptionId: recording.id,
+                fingerprint: fingerprint,
                 allowMergeIntoExistingName: false
             )
             XCTAssertEqual(result, .rejectedEmptyName)
@@ -474,6 +485,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "Sarah",
             observation: cluster("S1", voice: 0, degrees: 14.1),
             transcriptionId: second.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
 
@@ -539,6 +551,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
                 displayName: "Sarah",
                 observation: cluster("S1", voice: 0, degrees: 14.1),
                 transcriptionId: recording.id,
+                fingerprint: fingerprint,
                 allowMergeIntoExistingName: false
             )
         }
@@ -548,6 +561,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "Sarah",
             observation: cluster("S1", voice: 0, degrees: 14.1),
             transcriptionId: overflow.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
 
@@ -569,6 +583,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
 
         let racing = SpeakerVoiceprintService(
             profiles: NameHidingStore(profiles),
+            candidates: candidates,
             journal: journal,
             policy: .v1,
             isEnabled: { true }
@@ -578,6 +593,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "Sarah",
             observation: cluster("S1", voice: 0, degrees: 14.1),
             transcriptionId: second.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
 
@@ -587,6 +603,170 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         XCTAssertEqual(profile.id, winner.id)
         XCTAssertEqual(try profiles.profiles().count, 1)
         XCTAssertEqual(try profiles.exemplars(profileId: winner.id).count, 2)
+    }
+
+    // MARK: Enrollment candidates
+
+    /// The run that matters most for enrollment is the first one, when there is
+    /// no profile to score against and every matching path returns early.
+    func testAVoiceIsRetainedEvenWhenThereIsNothingToMatchAgainst() async throws {
+        let recording = try savedTranscription()
+
+        _ = try await makeService().evaluate(
+            transcriptionId: recording.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 0)]
+        )
+
+        let observation = try await makeService().enrollmentCandidate(
+            transcriptionId: recording.id, speakerId: "S1", fingerprint: fingerprint
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(observation).embedding.vector, embedding(voice: 0, degrees: 0).vector
+        )
+    }
+
+    func testNothingIsRetainedWhileTheFeatureIsOff() async throws {
+        let recording = try savedTranscription()
+        enabled = false
+
+        _ = try await makeService().evaluate(
+            transcriptionId: recording.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 0)]
+        )
+
+        XCTAssertNil(
+            try candidates.candidate(
+                transcriptionId: recording.id, speakerId: "S1",
+                fingerprint: fingerprint.rawValue, now: Date()
+            )
+        )
+    }
+
+    /// A vector below the enrollment gate can never become an exemplar, so
+    /// keeping it would store biometric data for an offer never made.
+    func testAClusterTooShortToEnrollIsNotRetained() async throws {
+        let recording = try savedTranscription()
+
+        _ = try await makeService().evaluate(
+            transcriptionId: recording.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 0, speechSeconds: 14)]
+        )
+
+        XCTAssertNil(
+            try candidates.candidate(
+                transcriptionId: recording.id, speakerId: "S1",
+                fingerprint: fingerprint.rawValue, now: Date()
+            )
+        )
+    }
+
+    /// Captured while on, unreachable once off: the preference governs reads as
+    /// well as writes.
+    func testARetainedVoiceIsUnreachableAfterTheFeatureIsTurnedOff() async throws {
+        let recording = try savedTranscription()
+        _ = try await makeService().evaluate(
+            transcriptionId: recording.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 0)]
+        )
+
+        enabled = false
+
+        let offered = try await makeService().enrollmentCandidate(
+            transcriptionId: recording.id, speakerId: "S1", fingerprint: fingerprint
+        )
+        XCTAssertNil(offered)
+    }
+
+    func testARetainedVoiceStopsBeingOfferedOnceTheWindowLapses() async throws {
+        let recording = try savedTranscription()
+        let captured = Date(timeIntervalSince1970: 1_757_000_000)
+        let service = makeService(retention: 60, now: captured)
+        _ = try await service.evaluate(
+            transcriptionId: recording.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 0)]
+        )
+
+        let withinWindow = try await makeService(retention: 60, now: captured.addingTimeInterval(59))
+            .enrollmentCandidate(
+                transcriptionId: recording.id, speakerId: "S1", fingerprint: fingerprint
+            )
+        XCTAssertNotNil(withinWindow)
+
+        let lapsed = try await makeService(retention: 60, now: captured.addingTimeInterval(60))
+            .enrollmentCandidate(
+                transcriptionId: recording.id, speakerId: "S1", fingerprint: fingerprint
+            )
+        XCTAssertNil(lapsed)
+    }
+
+    /// Once promoted, the vector lives in the profile; a second copy would be
+    /// biometric data kept for nothing.
+    func testEnrollingConsumesTheCandidate() async throws {
+        let recording = try savedTranscription()
+        let service = makeService()
+        _ = try await service.evaluate(
+            transcriptionId: recording.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 0)]
+        )
+
+        let offered = try await service.enrollmentCandidate(
+            transcriptionId: recording.id, speakerId: "S1", fingerprint: fingerprint
+        )
+        let observation = try XCTUnwrap(offered)
+        _ = try await service.enroll(
+            displayName: "Sarah",
+            observation: observation,
+            transcriptionId: recording.id,
+            fingerprint: fingerprint,
+            allowMergeIntoExistingName: false
+        )
+
+        XCTAssertNil(
+            try candidates.candidate(
+                transcriptionId: recording.id, speakerId: "S1",
+                fingerprint: fingerprint.rawValue, now: Date()
+            )
+        )
+    }
+
+    func testConfirmingConsumesTheCandidateOnceTheProfileLearns() async throws {
+        let first = try savedTranscription()
+        try await enrolledSarah(transcriptionId: first.id)
+        let second = try savedTranscription()
+        let service = makeService()
+        _ = try await service.enroll(
+            displayName: "Sarah",
+            observation: cluster("S1", voice: 0, degrees: 14.1),
+            transcriptionId: second.id,
+            fingerprint: fingerprint,
+            allowMergeIntoExistingName: false
+        )
+
+        let third = try savedTranscription()
+        let suggestions = try await service.evaluate(
+            transcriptionId: third.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 14.1)]
+        )
+        try await service.confirm(
+            try XCTUnwrap(suggestions.first),
+            observation: cluster("S1", voice: 0, degrees: 14.1),
+            transcriptionId: third.id,
+            fingerprint: fingerprint
+        )
+
+        XCTAssertNil(
+            try candidates.candidate(
+                transcriptionId: third.id, speakerId: "S1",
+                fingerprint: fingerprint.rawValue, now: Date()
+            )
+        )
     }
 
     // MARK: Confirmation
@@ -627,6 +807,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "Sarah",
             observation: cluster("S1", voice: 0, degrees: 14.1),
             transcriptionId: second.id,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
 
@@ -653,13 +834,19 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
     /// Reads `enabled` once, at construction: capturing it lazily would put the
     /// test case itself inside a `@Sendable` closure. Every test that flips the
     /// preference does so before building its service.
-    private func makeService() -> SpeakerVoiceprintService {
+    private func makeService(
+        retention: TimeInterval = SpeakerEmbeddingCandidateRepository.defaultRetention,
+        now: Date? = nil
+    ) -> SpeakerVoiceprintService {
         let enabled = enabled
         return SpeakerVoiceprintService(
             profiles: profiles,
+            candidates: candidates,
             journal: journal,
             policy: .v1,
-            isEnabled: { enabled }
+            candidateRetention: retention,
+            isEnabled: { enabled },
+            now: { now ?? Date() }
         )
     }
 
@@ -700,6 +887,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             displayName: "Sarah",
             observation: cluster("S1", voice: 0, degrees: 0),
             transcriptionId: transcriptionId,
+            fingerprint: fingerprint,
             allowMergeIntoExistingName: false
         )
         guard case .created(let profile) = result else {

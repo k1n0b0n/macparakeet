@@ -23,6 +23,7 @@ final class AppEnvironment {
     let speakerAttributionReader: SpeakerAttributionReadService
     let speakerCorrectionService: SpeakerCorrectionService
     let speakerProfileRepo: SpeakerProfileRepository
+    let speakerEmbeddingCandidateRepo: SpeakerEmbeddingCandidateRepository
     let speakerMatchJournalRepo: SpeakerMatchJournalRepository
     let speakerVoiceprintService: SpeakerVoiceprintService
     let customWordRepo: CustomWordRepository
@@ -91,12 +92,18 @@ final class AppEnvironment {
         speakerAttributionReader = SpeakerAttributionReadService(dbQueue: databaseManager.dbQueue)
         speakerCorrectionService = SpeakerCorrectionService(dbQueue: databaseManager.dbQueue)
         speakerProfileRepo = SpeakerProfileRepository(dbQueue: databaseManager.dbQueue)
+        speakerEmbeddingCandidateRepo = SpeakerEmbeddingCandidateRepository(
+            dbQueue: databaseManager.dbQueue
+        )
         speakerMatchJournalRepo = SpeakerMatchJournalRepository(dbQueue: databaseManager.dbQueue)
         speakerVoiceprintService = SpeakerVoiceprintService(
             profiles: speakerProfileRepo,
+            candidates: speakerEmbeddingCandidateRepo,
             journal: speakerMatchJournalRepo,
             isEnabled: { UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled() }
         )
+        // Nothing else prunes for a user who stops recording and stops naming.
+        try? speakerEmbeddingCandidateRepo.pruneExpired()
         customWordRepo = CustomWordRepository(dbQueue: databaseManager.dbQueue)
         snippetRepo = TextSnippetRepository(dbQueue: databaseManager.dbQueue)
         chatConversationRepo = ChatConversationRepository(dbQueue: databaseManager.dbQueue)
