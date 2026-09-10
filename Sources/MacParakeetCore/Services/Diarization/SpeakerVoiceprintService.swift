@@ -137,6 +137,14 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
             return .created(profile)
         }
 
+        // Checked before the pollution guard and regardless of the override:
+        // the store refuses samples from another embedding model, and a forced
+        // merge is the caller overriding a judgement about *which person* this
+        // is, not about whether the two vectors can be compared at all.
+        guard existing.embeddingModelId == observation.embedding.identity.embeddingModelId else {
+            return .needsDisambiguation(existing: existing, distance: 1)
+        }
+
         let references = try references(for: existing.id)
         if !allowMergeIntoExistingName, !references.isEmpty {
             let candidate = SpeakerProfileCandidate(
@@ -144,9 +152,8 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 displayName: existing.displayName,
                 references: references
             )
-            // A nil distance means the models are incomparable, which is less
-            // evidence than a far one, not more: treat it as a mismatch rather
-            // than letting it fall through into a silent merge.
+            // A nil distance is less evidence than a far one, not more: treat
+            // it as a mismatch rather than a silent merge.
             let distance = SpeakerVoiceprintMatcher.distance(
                 from: observation, to: candidate, policy: policy
             )

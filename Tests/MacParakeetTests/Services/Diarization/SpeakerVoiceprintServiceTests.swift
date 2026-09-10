@@ -420,6 +420,40 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         XCTAssertEqual(try profiles.exemplars(profileId: profile.id).count, 1)
     }
 
+    /// Forcing a merge overrides a judgement about which person this is, not
+    /// about whether two vectors can be compared: the store would refuse the
+    /// sample anyway, so the service must stop first.
+    func testForcingAMergeStillRefusesAnIncomparableModel() async throws {
+        let first = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: first.id)
+        let second = try savedTranscription()
+
+        let otherModel = SpeakerModelIdentity(
+            embeddingModelId: "other-model",
+            aggregationProfileId: identity.aggregationProfileId
+        )
+        var values = [Float](repeating: 0, count: SpeakerEmbedding.dimension)
+        values[0] = 1
+        let observation = SpeakerClusterObservation(
+            speakerId: "S1",
+            embedding: try XCTUnwrap(SpeakerEmbedding(rawVector: values, identity: otherModel)),
+            speechSeconds: 30,
+            captureDomain: .system
+        )
+
+        let result = try await makeService().enroll(
+            displayName: "Sarah",
+            observation: observation,
+            transcriptionId: second.id,
+            allowMergeIntoExistingName: true
+        )
+
+        guard case .needsDisambiguation = result else {
+            return XCTFail("expected disambiguation, got \(result)")
+        }
+        XCTAssertEqual(try profiles.exemplars(profileId: profile.id).count, 1)
+    }
+
     // MARK: Confirmation
 
     func testConfirmingRecordsTheLinkButDoesNotAmplifyAYoungProfile() async throws {
