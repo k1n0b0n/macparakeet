@@ -3,6 +3,9 @@ import Foundation
 /// What happened when the user asked to remember a voice.
 public enum SpeakerProfileEnrollment: Sendable, Equatable {
     case created(SpeakerProfile)
+    /// The name was blank once trimmed. It would have no lookup key, so the
+    /// profile could never be found again nor collide with a second blank one.
+    case rejectedEmptyName
     case addedExemplar(SpeakerProfile)
     /// The name is taken by a profile whose voice does not match. Merging would
     /// fuse two people, so the caller must ask.
@@ -86,12 +89,15 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         let candidates = try candidates()
         guard !candidates.isEmpty else { return [] }
 
-        let dismissed = try Set(
+        // Both terminal statuses are excluded, not just refusals: rescoring a
+        // confirmed speaker would write a fresh suggestion over the answer the
+        // user already gave, and the store now refuses that outright.
+        let decided = try Set(
             profiles.links(transcriptionId: transcriptionId, fingerprint: fingerprint.rawValue)
-                .filter { $0.status == .dismissed }
+                .filter { $0.status != .suggested }
                 .map(\.speakerId)
         )
-        let scored = clusters.filter { !dismissed.contains($0.speakerId) }
+        let scored = clusters.filter { !decided.contains($0.speakerId) }
         guard !scored.isEmpty else { return [] }
 
         let decisions = SpeakerVoiceprintMatcher.decisions(
@@ -116,6 +122,9 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         allowMergeIntoExistingName: Bool
     ) async throws -> SpeakerProfileEnrollment {
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !SpeakerProfile.normalizedName(for: name).isEmpty else {
+            return .rejectedEmptyName
+        }
         guard observation.speechSeconds >= policy.minSpeechSecondsToEnroll else {
             return .rejectedTooShort(speechSeconds: observation.speechSeconds)
         }

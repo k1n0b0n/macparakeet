@@ -454,6 +454,53 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         XCTAssertEqual(try profiles.exemplars(profileId: profile.id).count, 1)
     }
 
+    func testEnrollRefusesABlankName() async throws {
+        let recording = try savedTranscription()
+        for blank in ["", "   ", "\n\t"] {
+            let result = try await makeService().enroll(
+                displayName: blank,
+                observation: cluster("S1", voice: 0, degrees: 0),
+                transcriptionId: recording.id,
+                allowMergeIntoExistingName: false
+            )
+            XCTAssertEqual(result, .rejectedEmptyName)
+        }
+        XCTAssertTrue(try profiles.profiles().isEmpty)
+    }
+
+    /// A confirmation is as final as a refusal: rescoring would write a fresh
+    /// suggestion over the answer the user gave.
+    func testConfirmedSpeakersAreNotScoredAgain() async throws {
+        let recording = try savedTranscription()
+        _ = try await enrolledSarah(transcriptionId: recording.id)
+        let next = try savedTranscription()
+        let service = makeService()
+
+        let first = try await service.evaluate(
+            transcriptionId: next.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 14.1)]
+        )
+        try await service.confirm(
+            try XCTUnwrap(first.first),
+            observation: cluster("S1", voice: 0, degrees: 14.1),
+            transcriptionId: next.id,
+            fingerprint: fingerprint
+        )
+
+        let second = try await service.evaluate(
+            transcriptionId: next.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 14.1)]
+        )
+        XCTAssertTrue(second.isEmpty)
+        XCTAssertEqual(
+            try profiles.links(transcriptionId: next.id, fingerprint: fingerprint.rawValue)
+                .map(\.status),
+            [.confirmed]
+        )
+    }
+
     // MARK: Confirmation
 
     func testConfirmingRecordsTheLinkButDoesNotAmplifyAYoungProfile() async throws {
