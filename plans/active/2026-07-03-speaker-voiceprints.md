@@ -230,6 +230,12 @@ accumulation). That's Phase 3, a separate opt-in, decided later.
   per-segment embedding, which the offline pipeline does not expose (Amendment 2).
   A recording yields one vector, so storing several would inflate `sampleCount`
   against no new evidence: K references must mean K distinct recordings.
+- **At the cap, evict the oldest confirmation** (Amendment). K is a storage
+  bound, not a scoring ceiling: vectors the matcher can never reach would be
+  biometric data kept for nothing. Manual enrollments are spared, because
+  `confirm` counts them to decide whether a profile may learn at all — evicting
+  oldest-first would drop a mature profile back below that anchor for no visible
+  reason. A profile holding K manual enrollments refuses further samples.
 - Channel tags on every sample (`system`, `microphone`, `file`) — prefer
   same-channel references when scoring; channel mismatch is the default failure
   mode, not an edge case.
