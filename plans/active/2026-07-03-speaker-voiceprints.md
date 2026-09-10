@@ -290,7 +290,7 @@ accumulation). That's Phase 3, a separate opt-in, decided later.
   surface — JSON/TXT/MD/SRT/VTT/PDF/DOCX exports, `ExportCommand.projectedJSON()`,
   diagnostics, support bundles, and any future database export. This holds by
   construction (no export path reads these tables, and nothing is added to
-  `Transcription`), and PR 7 adds contract tests that assert it per table rather than
+  `Transcription`), and PR 8 adds contract tests that assert it per table rather than
   relying on that construction staying true.
 - **Privacy invariants**: profile store lives in the user DB, covered by existing
   user-data deletion rules.
@@ -320,7 +320,7 @@ differentiator, but honestly:
   distance distributions across meetings + channels. Output: research report with
   separation evidence, chosen τ + margin, and a GO/NO-GO. Kills the feature
   cheaply if WeSpeaker can't separate on compressed system audio.
-- **Phase 1 — core loop (meetings), seven independently shippable PRs.** PRs 1–4 are
+- **Phase 1 — core loop (meetings), eight independently shippable PRs.** PRs 1–5 are
   invisible to users:
   1. Surface embeddings through the diarization adapter: `SpeakerEmbedding` (normalizing
      on entry), `SpeakerCaptureDomain`, `SpeakerModelIdentity`, per-cluster speech
@@ -329,9 +329,12 @@ differentiator, but honestly:
   2. Migration + `SpeakerProfileRepository`.
   3. `SpeakerVoiceprintMatcher` — pure logic, the test-dense PR.
   4. Service wiring + decision journal, flag off.
-  5. Enrollment prompt, consent gate, suggestion banner (confirm/dismiss).
-  6. Voice-profile admin screen + a Reset & Cleanup row.
-  7. Leak tests (export JSON, CLI `projectedJSON()`, feedback bundle), specs, ADR,
+  5. Short-lived enrollment candidates (decision 9): without them nothing can be
+     enrolled after the fact, because the vector is gone by the time the user types
+     a name.
+  6. Enrollment prompt, consent gate, suggestion banner (confirm/dismiss).
+  7. Voice-profile admin screen + a Reset & Cleanup row.
+  8. Leak tests (export JSON, CLI `projectedJSON()`, feedback bundle), specs, ADR,
      privacy docs, telemetry allowlist.
 - **Phase 2 — breadth.** File/URL-transcription path (the Reddit author's
   185-episode podcast case), profile management UI, confirmation-driven
@@ -339,8 +342,9 @@ differentiator, but honestly:
   2026-06-14 plan's speaker-memory section), user-facing privacy docs, CLI
   `speakers list|delete` parity.
 - **Phase 3 — judged later, each its own decision.** Recurring-unknown detection
-  (the issue's literal "appeared in 5 recordings" ask — needs ambient embedding
-  retention, separate opt-in); backfill scan over retained audio; live-path
+  (the issue's literal "appeared in 5 recordings" ask — still out of scope: it needs
+  unenrolled vectors compared *against each other*, which decision 9's candidates
+  never are, and its own opt-in); backfill scan over retained audio; live-path
   identity once live diarization (#430) ships; calendar-attendee hints (hints
   only, never authoritative).
 
@@ -364,3 +368,31 @@ differentiator, but honestly:
 8. **Admin screen ships with the feature, not after it.** No deletion surface means no
    right to erasure, which means not shippable. It also carries the diagnostic read-out
    that turns "this profile never matches" from a mystery into a number.
+
+## Decisions (2026-09-10)
+
+9. **Short-lived enrollment candidates**, revising decision 2. The flywheel needs the
+   user to name a speaker in a finished transcript, but by then the vector is gone: it
+   lives in memory during transcription, feeds scoring, and is discarded. The three
+   alternatives are worse. Re-diarizing on demand needs audio that retention settings or
+   "Remove Audio Only" may have purged, costs minutes for what reads as an instant
+   action, and can re-cut the clusters — so the `speakerId` mapping may not survive, and
+   a reconciliation error would enroll the wrong voice under the given name, the worst
+   failure this feature has. An in-memory window makes the offer vanish on restart with
+   no explanation a user could follow. Enrolling from a hand-picked excerpt needs a
+   second FluidAudio manager (`extractSpeakerEmbedding` exists only on the streaming
+   `DiarizerManager`) and puts the work on the user for every person.
+
+   `speaker_embedding_candidates` therefore holds a vector per detected speaker, bounded
+   on every side: written only while `rememberSpeakers` is on, only above the enrollment
+   gate, never compared against each other (so this is not recurring-unknown detection),
+   promoted to an exemplar and dropped on enrollment, deleted with their transcription,
+   excluded from exports, stated in the consent sheet, and expiring after seven days on
+   a per-row `expiresAt` so raising the constant cannot resurrect them. Anarlog keeps 45
+   days; naming is a same-week action and unnamed vectors earn nothing by waiting.
+
+   Decision 2 targeted ambient accumulation — an app that banks everyone's voice unasked.
+   With the preference off by default nothing is stored until the user asks for the
+   feature. But BIPA and the GDPR do not distinguish a useful print from a dormant one,
+   and this is the first privacy invariant the series loosens rather than tightens, so it
+   goes in the promoted ADR (Phase 2) explicitly rather than into a commit message.
