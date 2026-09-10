@@ -133,36 +133,72 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
             return .rejectedTooShort(speechSeconds: observation.speechSeconds)
         }
 
-        guard var existing = try profiles.profile(named: name) else {
-            let profile = SpeakerProfile(
-                displayName: name,
-                identity: observation.embedding.identity,
-                createdAt: now(),
-                updatedAt: now()
-            )
-            try profiles.save(profile)
-            try addExemplar(
-                to: profile,
+        if let existing = try profiles.profile(named: name) {
+            return try sample(
+                existing,
                 observation: observation,
-                origin: .manualEnrollment,
-                transcriptionId: transcriptionId
+                transcriptionId: transcriptionId,
+                allowMergeIntoExistingName: allowMergeIntoExistingName
             )
-            return .created(profile)
         }
 
+        let profile = SpeakerProfile(
+            displayName: name,
+            identity: observation.embedding.identity,
+            createdAt: now(),
+            updatedAt: now()
+        )
+        do {
+            try profiles.insert(profile)
+        } catch SpeakerProfileStoreError.nameAlreadyTaken {
+            // Another enrollment claimed the name between the lookup and the
+            // insert. The user asked for a name, not for a row, so the second
+            // one samples the winner instead of failing.
+            guard let winner = try profiles.profile(named: name) else {
+                throw SpeakerProfileStoreError.nameAlreadyTaken(
+                    normalizedName: SpeakerProfile.normalizedName(for: name)
+                )
+            }
+            return try sample(
+                winner,
+                observation: observation,
+                transcriptionId: transcriptionId,
+                allowMergeIntoExistingName: allowMergeIntoExistingName
+            )
+        }
+
+        _ = try addExemplar(
+            to: profile,
+            observation: observation,
+            origin: .manualEnrollment,
+            transcriptionId: transcriptionId
+        )
+        return .created(profile)
+    }
+
+    /// Adds this voice to a profile that already exists, which is where the
+    /// pollution guard applies: the name is a claim about identity that no
+    /// threshold has checked.
+    private func sample(
+        _ profile: SpeakerProfile,
+        observation: SpeakerClusterObservation,
+        transcriptionId: UUID,
+        allowMergeIntoExistingName: Bool
+    ) throws -> SpeakerProfileEnrollment {
+        var profile = profile
         // Checked before the pollution guard and regardless of the override:
         // the store refuses samples from another embedding model, and a forced
         // merge is the caller overriding a judgement about *which person* this
         // is, not about whether the two vectors can be compared at all.
-        guard existing.embeddingModelId == observation.embedding.identity.embeddingModelId else {
-            return .needsDisambiguation(existing: existing, distance: 1)
+        guard profile.embeddingModelId == observation.embedding.identity.embeddingModelId else {
+            return .needsDisambiguation(existing: profile, distance: 1)
         }
 
-        let references = try references(for: existing.id)
+        let references = try references(for: profile.id)
         if !allowMergeIntoExistingName, !references.isEmpty {
             let candidate = SpeakerProfileCandidate(
-                profileId: existing.id,
-                displayName: existing.displayName,
+                profileId: profile.id,
+                displayName: profile.displayName,
                 references: references
             )
             // A nil distance is less evidence than a far one, not more: treat
@@ -171,23 +207,25 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 from: observation, to: candidate, policy: policy
             )
             if distance ?? .infinity > policy.pollutionGuardDistance {
-                return .needsDisambiguation(existing: existing, distance: distance ?? 1)
+                return .needsDisambiguation(existing: profile, distance: distance ?? 1)
             }
         }
 
-        let sampled = try profiles.exemplars(profileId: existing.id)
-            .contains { $0.sourceTranscriptionId == transcriptionId }
-        guard !sampled else { return .alreadySampled(existing) }
-
-        guard try addExemplar(
-            to: existing,
+        switch try addExemplar(
+            to: profile,
             observation: observation,
             origin: .manualEnrollment,
             transcriptionId: transcriptionId
-        ) else { return .rejectedProfileFull(existing) }
-        existing.updatedAt = now()
-        try profiles.save(existing)
-        return .addedExemplar(existing)
+        ) {
+        case .rejectedProfileFull:
+            return .rejectedProfileFull(profile)
+        case .rejectedAlreadySampled:
+            return .alreadySampled(profile)
+        case .inserted, .insertedEvicting:
+            profile.updatedAt = now()
+            try profiles.save(profile)
+            return .addedExemplar(profile)
+        }
     }
 
     // MARK: Decisions
@@ -219,12 +257,10 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         )
 
         // A profile born of one enrollment cannot amplify itself on its own
-        // suggestion: two manual enrollments must anchor the voice first.
+        // suggestion: two manual enrollments must anchor the voice first. The
+        // one-sample-per-recording rule is the store's, so no check here.
         let exemplars = try profiles.exemplars(profileId: profile.id)
-        let manualCount = exemplars.filter { $0.origin == .manualEnrollment }.count
-        let alreadySampled = exemplars.contains { $0.sourceTranscriptionId == transcriptionId }
-
-        if manualCount >= 2, !alreadySampled {
+        if exemplars.filter({ $0.origin == .manualEnrollment }).count >= 2 {
             try addExemplar(
                 to: profile,
                 observation: observation,
@@ -298,8 +334,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         )
     }
 
-    /// Adds a sample, evicting the oldest confirmation once the cap is reached.
-    /// Returns `false` when the profile is full of manual enrollments.
+    /// Adds a sample under the cap, in the store's transaction.
     ///
     /// The cap bounds storage, not just scoring: keeping vectors the matcher
     /// will never reach would accumulate biometric data for nothing. Eviction
@@ -312,17 +347,8 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         observation: SpeakerClusterObservation,
         origin: SpeakerProfileExemplar.Origin,
         transcriptionId: UUID?
-    ) throws -> Bool {
-        let existing = try profiles.exemplars(profileId: profile.id)
-        if existing.count >= policy.maxReferencesPerProfile {
-            guard let evictable = existing
-                .filter({ $0.origin == .confirmedSuggestion })
-                .min(by: { $0.createdAt < $1.createdAt })
-            else { return false }
-            _ = try profiles.deleteExemplar(id: evictable.id)
-        }
-
-        try profiles.insert(
+    ) throws -> SpeakerExemplarInsertion {
+        try profiles.insertExemplar(
             SpeakerProfileExemplar(
                 profileId: profile.id,
                 embedding: observation.embedding,
@@ -332,9 +358,10 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 sourceTranscriptionId: transcriptionId,
                 sourceSpeakerId: observation.speakerId,
                 createdAt: now()
-            )
+            ),
+            maxPerProfile: policy.maxReferencesPerProfile,
+            evicting: .confirmedSuggestion
         )
-        return true
     }
 
     /// Pending links for suggestions, and every decision to the local journal.

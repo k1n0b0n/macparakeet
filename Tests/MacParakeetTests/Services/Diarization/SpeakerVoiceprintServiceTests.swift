@@ -560,6 +560,35 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         )
     }
 
+    /// The user asked for a name, not for a row: when another enrollment claims
+    /// it between the lookup and the insert, the second one samples the winner
+    /// rather than failing.
+    func testAnEnrollmentThatLosesTheNameRaceSamplesTheWinner() async throws {
+        let first = try savedTranscription()
+        let winner = try await enrolledSarah(transcriptionId: first.id)
+
+        let racing = SpeakerVoiceprintService(
+            profiles: NameHidingStore(profiles),
+            journal: journal,
+            policy: .v1,
+            isEnabled: { true }
+        )
+        let second = try savedTranscription()
+        let result = try await racing.enroll(
+            displayName: "Sarah",
+            observation: cluster("S1", voice: 0, degrees: 14.1),
+            transcriptionId: second.id,
+            allowMergeIntoExistingName: false
+        )
+
+        guard case .addedExemplar(let profile) = result else {
+            return XCTFail("expected the loser to sample the winner, got \(result)")
+        }
+        XCTAssertEqual(profile.id, winner.id)
+        XCTAssertEqual(try profiles.profiles().count, 1)
+        XCTAssertEqual(try profiles.exemplars(profileId: winner.id).count, 2)
+    }
+
     // MARK: Confirmation
 
     func testConfirmingRecordsTheLinkButDoesNotAmplifyAYoungProfile() async throws {
@@ -674,4 +703,50 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         }
         return profile
     }
+}
+
+/// Hides a name from the first lookup so `enroll` takes the path where another
+/// enrollment claimed it in between.
+private final class NameHidingStore: SpeakerProfileRepositoryProtocol {
+    private let wrapped: SpeakerProfileRepository
+    private let lock = NSLock()
+    private var hidden = true
+
+    init(_ wrapped: SpeakerProfileRepository) {
+        self.wrapped = wrapped
+    }
+
+    func profile(named name: String) throws -> SpeakerProfile? {
+        lock.lock()
+        let hide = hidden
+        hidden = false
+        lock.unlock()
+        return hide ? nil : try wrapped.profile(named: name)
+    }
+
+    func profiles() throws -> [SpeakerProfile] { try wrapped.profiles() }
+    func profile(id: UUID) throws -> SpeakerProfile? { try wrapped.profile(id: id) }
+    func insert(_ profile: SpeakerProfile) throws { try wrapped.insert(profile) }
+    func save(_ profile: SpeakerProfile) throws { try wrapped.save(profile) }
+    func exemplars(profileId: UUID) throws -> [SpeakerProfileExemplar] {
+        try wrapped.exemplars(profileId: profileId)
+    }
+    func exemplarsByProfile() throws -> [UUID: [SpeakerProfileExemplar]] {
+        try wrapped.exemplarsByProfile()
+    }
+    func insert(_ exemplar: SpeakerProfileExemplar) throws { try wrapped.insert(exemplar) }
+    func insertExemplar(
+        _ exemplar: SpeakerProfileExemplar,
+        maxPerProfile: Int,
+        evicting: SpeakerProfileExemplar.Origin
+    ) throws -> SpeakerExemplarInsertion {
+        try wrapped.insertExemplar(exemplar, maxPerProfile: maxPerProfile, evicting: evicting)
+    }
+    func deleteExemplar(id: UUID) throws -> Bool { try wrapped.deleteExemplar(id: id) }
+    func links(transcriptionId: UUID, fingerprint: String) throws -> [SpeakerProfileLink] {
+        try wrapped.links(transcriptionId: transcriptionId, fingerprint: fingerprint)
+    }
+    func save(_ link: SpeakerProfileLink) throws { try wrapped.save(link) }
+    func deleteProfile(id: UUID) throws -> Bool { try wrapped.deleteProfile(id: id) }
+    func deleteAllProfiles() throws { try wrapped.deleteAllProfiles() }
 }
