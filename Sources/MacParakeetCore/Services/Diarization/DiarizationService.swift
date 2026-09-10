@@ -467,20 +467,28 @@ public actor DiarizationService: DiarizationServiceProtocol {
     /// even when the embedding model is untouched.
     private nonisolated static let pipelineRevision = "fluidaudio-0.15.6"
 
-    /// Identity of the representation `config` produces. The aggregation half
-    /// hashes the settings that shape the centroid, VBx refinement included,
-    /// so a FluidAudio upgrade that retunes them is caught without anyone
-    /// remembering to bump `pipelineRevision`.
-    ///
-    /// The per-run speaker count is excluded on purpose. It is derived from the
-    /// calendar attendee count, so it changes from meeting to meeting: folding
-    /// it in would make a profile cross-aggregation against its own samples and
-    /// keep tau permanently reduced by `crossAggregationPenalty`.
     /// Identity of the representation the shipping configuration produces.
     nonisolated static var defaultModelIdentity: SpeakerModelIdentity {
         modelIdentity(for: highAccuracyConfig)
     }
 
+    /// Identity of the representation `config` produces. The aggregation half
+    /// hashes the settings that shape the centroid, VBx refinement included,
+    /// so a FluidAudio upgrade that retunes them is caught without anyone
+    /// remembering to bump `pipelineRevision`.
+    ///
+    /// The per-run speaker count is excluded on purpose, even though it reaches
+    /// the clusterer through `config`. It comes from the calendar attendee
+    /// count, so it changes from meeting to meeting: folding it in would make a
+    /// profile cross-aggregation against its own samples and keep tau
+    /// permanently reduced by `crossAggregationPenalty` — below the worst true
+    /// positive Phase 0b measured, so correct pairs would start being refused.
+    ///
+    /// What the app passes is also a cap, never an exact count
+    /// (`MeetingSpeakerPrior` bounds are `min 1, max n + 1`), so it re-clusters
+    /// nothing unless the diarizer oversplits past it. The exact form that does
+    /// move the partition (FluidAudio #801) arrives only from the CLI's
+    /// `--speaker-count`, and that path enrolls nothing in v1.
     nonisolated static func modelIdentity(for config: OfflineDiarizerConfig) -> SpeakerModelIdentity {
         let canonical = [
             "pipeline=\(pipelineRevision)",
