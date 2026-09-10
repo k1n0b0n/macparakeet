@@ -2039,11 +2039,10 @@ public final class DatabaseManager: Sendable {
                 """)
         }
 
-        // v0.40 — Local record of every voiceprint matching decision, kept so
-        // the shipped thresholds can be calibrated on real post-AEC meetings
-        // instead of on borrowed clean-corpus numbers. Distances joined to the
-        // label a user actually typed are identifying, so these rows stay on
-        // the machine, never enter a support bundle, and expire.
+        // v0.40 — Local record of every matching decision, so thresholds can be
+        // calibrated on real post-AEC meetings. Distances joined to the label a
+        // user typed are identifying: local-only, never in a support bundle,
+        // and they expire.
         migrator.registerMigration("v0.40-speaker-match-journal") { db in
             try db.execute(sql: """
                 CREATE TABLE speaker_match_journal (

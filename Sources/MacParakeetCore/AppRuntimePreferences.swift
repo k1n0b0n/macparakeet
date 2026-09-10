@@ -515,13 +515,10 @@ public final class UserDefaultsAppRuntimePreferences: AppRuntimePreferencesProto
     public static let defaultSpeakerDiarizationEnabled = true
     public static let meetingSpeakerDiarizationKey = "meetingSpeakerDiarization"
     public static let defaultMeetingSpeakerDiarizationEnabled = true
-    /// Persistent voice profiles. Off unless the user asks: a voiceprint is
-    /// biometric data, so it takes an explicit act, never a default.
+    /// Off unless the user asks: a voiceprint is biometric data.
     public static let rememberSpeakersKey = "rememberSpeakers"
     public static let defaultRememberSpeakersEnabled = false
-    /// When the user acknowledged that they have the participants' permission.
-    /// A date rather than a flag, because that is what the question "when did
-    /// you consent?" needs answering with.
+    /// A date rather than a flag: "when did you consent?" needs one.
     public static let voiceprintConsentAcknowledgedAtKey = "voiceprintConsentAcknowledgedAt"
     public static let aiFormatterEnabledKey = "aiFormatterEnabled"
     public static let aiFormatterEnabledForDictationKey = "aiFormatterEnabledForDictation"
@@ -589,8 +586,7 @@ public final class UserDefaultsAppRuntimePreferences: AppRuntimePreferencesProto
         defaults.object(forKey: meetingSpeakerDiarizationKey) as? Bool ?? defaultMeetingSpeakerDiarizationEnabled
     }
 
-    /// Voice profiles need speaker detection to have produced clusters in the
-    /// first place, so the two are checked together rather than separately.
+    /// Requires speaker detection: without clusters there is nothing to match.
     public static func rememberSpeakersEnabled(defaults: UserDefaults = .standard) -> Bool {
         let enabled = defaults.object(forKey: rememberSpeakersKey) as? Bool
             ?? defaultRememberSpeakersEnabled

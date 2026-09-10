@@ -2,11 +2,9 @@ import Foundation
 import GRDB
 
 /// One matching decision, kept locally so thresholds can be calibrated on real
-/// meetings rather than on the clean-corpus numbers the plan had to borrow.
-///
-/// Ground truth arrives for free: the label the user ends up typing says
-/// whether the decision was right. That makes these rows identifying, so they
-/// never leave the machine and they expire.
+/// meetings rather than the clean-corpus numbers the plan had to borrow. The
+/// label the user ends up typing is the ground truth, which makes these rows
+/// identifying: they never leave the machine, and they expire.
 public struct SpeakerMatchJournalEntry: Codable, Identifiable, Sendable, Equatable {
     public var id: UUID
     public var transcriptionId: UUID
@@ -19,11 +17,6 @@ public struct SpeakerMatchJournalEntry: Codable, Identifiable, Sendable, Equatab
     public var speechSeconds: Double
     public var createdAt: Date
 
-    /// - Parameters:
-    ///   - profileId: the profile involved, absent when no enrolled voice was
-    ///     comparable.
-    ///   - topDistance: the closest distance considered, absent when nothing
-    ///     was scored.
     public init(
         id: UUID = UUID(),
         transcriptionId: UUID,
@@ -59,14 +52,12 @@ public protocol SpeakerMatchJournalRepositoryProtocol: Sendable {
     func entries(retention: TimeInterval, now: Date) throws -> [SpeakerMatchJournalEntry]
     /// Removes everything past the window. Safe to call at any time.
     func prune(retention: TimeInterval, now: Date) throws
-    /// Forgets every decision. Profiles and transcripts are untouched.
     func deleteAll() throws
 }
 
 public final class SpeakerMatchJournalRepository: SpeakerMatchJournalRepositoryProtocol {
-    /// Long enough to accumulate the twenty-odd meetings calibration needs,
-    /// short enough that the journal never becomes an archive of who spoke to
-    /// whom.
+    /// Long enough for the twenty-odd meetings calibration needs, short enough
+    /// that this never becomes an archive of who spoke to whom.
     public static let defaultRetention: TimeInterval = 90 * 24 * 60 * 60
 
     private let dbQueue: DatabaseQueue
@@ -75,8 +66,7 @@ public final class SpeakerMatchJournalRepository: SpeakerMatchJournalRepositoryP
         self.dbQueue = dbQueue
     }
 
-    /// Appends a pass and drops anything past the retention window, in one
-    /// transaction.
+    /// Appends and prunes in one transaction.
     public func append(
         _ entries: [SpeakerMatchJournalEntry],
         retention: TimeInterval,
@@ -90,11 +80,8 @@ public final class SpeakerMatchJournalRepository: SpeakerMatchJournalRepositoryP
         }
     }
 
-    /// Prunes, then reads.
-    ///
     /// Expiry cannot ride on writes alone: a user who stops recording stops
-    /// appending, and rows past the window would then sit there indefinitely,
-    /// turning a ninety-day journal into a permanent record of who spoke.
+    /// appending, and a ninety-day journal would quietly become permanent.
     public func entries(
         retention: TimeInterval = defaultRetention,
         now: Date = Date()
