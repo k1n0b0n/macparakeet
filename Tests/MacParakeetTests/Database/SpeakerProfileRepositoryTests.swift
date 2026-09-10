@@ -295,6 +295,19 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         XCTAssertThrowsError(try repo.save(SpeakerProfile(displayName: "JOSÉ", identity: identity)))
     }
 
+    func testRenamingAProfileMovesItsLookupKey() throws {
+        var profile = SpeakerProfile(displayName: "Sarah", identity: identity)
+        try repo.save(profile)
+
+        profile.displayName = "Sarah Chen"
+        try repo.save(profile)
+
+        XCTAssertEqual(try repo.profile(named: "sarah chen")?.id, profile.id)
+        XCTAssertNil(try repo.profile(named: "Sarah"))
+        // The old key must not keep enforcing uniqueness either.
+        XCTAssertNoThrow(try repo.save(SpeakerProfile(displayName: "Sarah", identity: identity)))
+    }
+
     func testLookupIgnoresSurroundingWhitespace() throws {
         let profile = SpeakerProfile(displayName: "Sarah", identity: identity)
         try repo.save(profile)

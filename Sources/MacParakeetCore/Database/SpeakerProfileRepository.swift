@@ -58,7 +58,12 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
         }
     }
 
+    /// Recomputes the normalized key before writing: `displayName` is mutable,
+    /// so a rename would otherwise leave the old key enforcing uniqueness while
+    /// a lookup by the new name found nothing.
     public func save(_ profile: SpeakerProfile) throws {
+        var profile = profile
+        profile.normalizedName = SpeakerProfile.normalizedName(for: profile.displayName)
         try dbQueue.write { db in
             try profile.save(db)
         }
