@@ -113,7 +113,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         displayName: String,
         observation: SpeakerClusterObservation,
         transcriptionId: UUID,
-        allowMergeIntoExistingName: Bool = false
+        allowMergeIntoExistingName: Bool
     ) async throws -> SpeakerProfileEnrollment {
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard observation.speechSeconds >= policy.minSpeechSecondsToEnroll else {
@@ -196,11 +196,9 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
 
         // A profile born of one enrollment cannot amplify itself on its own
         // suggestion: two manual enrollments must anchor the voice first.
-        let manualCount = try profiles.exemplars(profileId: profile.id)
-            .filter { $0.origin == .manualEnrollment }
-            .count
-        let alreadySampled = try profiles.exemplars(profileId: profile.id)
-            .contains { $0.sourceTranscriptionId == transcriptionId }
+        let exemplars = try profiles.exemplars(profileId: profile.id)
+        let manualCount = exemplars.filter { $0.origin == .manualEnrollment }.count
+        let alreadySampled = exemplars.contains { $0.sourceTranscriptionId == transcriptionId }
 
         if manualCount >= 2, !alreadySampled {
             try addExemplar(

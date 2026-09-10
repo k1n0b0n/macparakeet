@@ -54,8 +54,11 @@ extension SpeakerMatchJournalEntry: FetchableRecord, PersistableRecord {
 public protocol SpeakerMatchJournalRepositoryProtocol: Sendable {
     /// Records one matching pass and prunes anything past the retention window.
     func append(_ entries: [SpeakerMatchJournalEntry], retention: TimeInterval, now: Date) throws
-    /// Everything still within the window, oldest first.
-    func entries() throws -> [SpeakerMatchJournalEntry]
+    /// Everything still within the window, oldest first. Expired rows are
+    /// removed first, so reading can never surface what should have expired.
+    func entries(retention: TimeInterval, now: Date) throws -> [SpeakerMatchJournalEntry]
+    /// Removes everything past the window. Safe to call at any time.
+    func prune(retention: TimeInterval, now: Date) throws
     /// Forgets every decision. Profiles and transcripts are untouched.
     func deleteAll() throws
 }
@@ -73,29 +76,46 @@ public final class SpeakerMatchJournalRepository: SpeakerMatchJournalRepositoryP
     }
 
     /// Appends a pass and drops anything past the retention window, in one
-    /// transaction. Pruning on write means no scheduler and no cleanup task to
-    /// forget.
+    /// transaction.
     public func append(
         _ entries: [SpeakerMatchJournalEntry],
-        retention: TimeInterval = defaultRetention,
-        now: Date = Date()
+        retention: TimeInterval,
+        now: Date
     ) throws {
         try dbQueue.write { db in
             for entry in entries {
                 try entry.insert(db)
             }
-            let cutoff = now.addingTimeInterval(-retention)
-            try db.execute(
-                sql: "DELETE FROM speaker_match_journal WHERE createdAt < ?",
-                arguments: [cutoff]
-            )
+            try deleteExpired(db, retention: retention, now: now)
         }
     }
 
-    public func entries() throws -> [SpeakerMatchJournalEntry] {
-        try dbQueue.read { db in
+    /// Prunes, then reads.
+    ///
+    /// Expiry cannot ride on writes alone: a user who stops recording stops
+    /// appending, and rows past the window would then sit there indefinitely,
+    /// turning a ninety-day journal into a permanent record of who spoke.
+    public func entries(
+        retention: TimeInterval = defaultRetention,
+        now: Date = Date()
+    ) throws -> [SpeakerMatchJournalEntry] {
+        try prune(retention: retention, now: now)
+        return try dbQueue.read { db in
             try SpeakerMatchJournalEntry.order(Column("createdAt")).fetchAll(db)
         }
+    }
+
+    public func prune(retention: TimeInterval = defaultRetention, now: Date = Date()) throws {
+        try dbQueue.write { db in
+            try deleteExpired(db, retention: retention, now: now)
+        }
+    }
+
+    private func deleteExpired(_ db: Database, retention: TimeInterval, now: Date) throws {
+        try db.execute(
+            sql: "DELETE FROM speaker_match_journal WHERE createdAt < ?",
+            arguments: [now.addingTimeInterval(-retention)]
+        )
     }
 
     public func deleteAll() throws {

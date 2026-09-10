@@ -38,7 +38,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         )
 
         XCTAssertTrue(suggestions.isEmpty)
-        XCTAssertTrue(try journal.entries().isEmpty)
+        XCTAssertTrue(try journal.entries(retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()).isEmpty)
         XCTAssertTrue(try profiles.links(transcriptionId: recording.id, fingerprint: fingerprint.rawValue).isEmpty)
     }
 
@@ -52,7 +52,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         )
 
         XCTAssertTrue(suggestions.isEmpty)
-        XCTAssertTrue(try journal.entries().isEmpty)
+        XCTAssertTrue(try journal.entries(retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()).isEmpty)
     }
 
     // MARK: Evaluation
@@ -138,7 +138,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         )
 
         let outcomes = Dictionary(
-            uniqueKeysWithValues: try journal.entries().map { ($0.speakerId, $0.outcome) }
+            uniqueKeysWithValues: try journal.entries(retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()).map { ($0.speakerId, $0.outcome) }
         )
         XCTAssertEqual(outcomes["S1"], .suggested)
         XCTAssertEqual(outcomes["S2"], .pastThreshold)
@@ -178,7 +178,41 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             retention: SpeakerMatchJournalRepository.defaultRetention,
             now: Date()
         )
-        XCTAssertTrue(try journal.entries().isEmpty)
+        XCTAssertTrue(try journal.entries(retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()).isEmpty)
+    }
+
+    /// Expiry cannot ride on writes alone: a user who stops recording stops
+    /// appending, and a ninety-day journal would quietly become permanent.
+    func testJournalExpiresEvenWhenNothingIsWrittenAgain() throws {
+        let recording = try savedTranscription()
+        let longAgo = Date(timeIntervalSinceNow: -10 * 24 * 60 * 60)
+        try journal.append(
+            [
+                SpeakerMatchJournalEntry(
+                    transcriptionId: recording.id,
+                    speakerId: "S1",
+                    outcome: .noComparableProfile,
+                    speechSeconds: 30,
+                    createdAt: longAgo
+                )
+            ],
+            retention: SpeakerMatchJournalRepository.defaultRetention,
+            now: longAgo
+        )
+        XCTAssertEqual(
+            try journal.entries(
+                retention: SpeakerMatchJournalRepository.defaultRetention, now: longAgo
+            ).count,
+            1
+        )
+
+        // Same rows, read once the window has passed, with no write in between.
+        XCTAssertTrue(
+            try journal.entries(retention: 24 * 60 * 60, now: Date()).isEmpty
+        )
+        try dbQueue.read { db in
+            XCTAssertEqual(try SpeakerMatchJournalEntry.fetchCount(db), 0)
+        }
     }
 
     // MARK: Enrollment
