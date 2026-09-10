@@ -341,6 +341,158 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         )
     }
 
+    // MARK: The sample cap
+
+    func testASampleBelowTheCapIsSimplyInserted() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+
+        let outcome = try repo.insertExemplar(
+            exemplar(profileId: profile.id, embedding: makeEmbedding(index: 1)),
+            maxPerProfile: 3,
+            evicting: .confirmedSuggestion
+        )
+
+        XCTAssertEqual(outcome, .inserted)
+        XCTAssertEqual(try repo.exemplars(profileId: profile.id).count, 1)
+    }
+
+    func testAtTheCapTheOldestEvictableSampleMakesRoom() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let epoch = Date(timeIntervalSince1970: 1_757_000_000)
+        let oldest = exemplar(
+            profileId: profile.id, embedding: makeEmbedding(index: 1),
+            origin: .confirmedSuggestion, createdAt: epoch
+        )
+        try repo.insert(oldest)
+        try repo.insert(
+            exemplar(
+                profileId: profile.id, embedding: makeEmbedding(index: 2),
+                origin: .confirmedSuggestion, createdAt: epoch.addingTimeInterval(60)
+            )
+        )
+
+        let outcome = try repo.insertExemplar(
+            exemplar(profileId: profile.id, embedding: makeEmbedding(index: 3)),
+            maxPerProfile: 2,
+            evicting: .confirmedSuggestion
+        )
+
+        XCTAssertEqual(outcome, .insertedEvicting(oldest.id))
+        let stored = try repo.exemplars(profileId: profile.id)
+        XCTAssertEqual(stored.count, 2)
+        XCTAssertFalse(stored.contains { $0.id == oldest.id })
+    }
+
+    func testAtTheCapWithNothingEvictableTheSampleIsRefused() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        try repo.insert(exemplar(profileId: profile.id, embedding: makeEmbedding(index: 1)))
+
+        let outcome = try repo.insertExemplar(
+            exemplar(profileId: profile.id, embedding: makeEmbedding(index: 2)),
+            maxPerProfile: 1,
+            evicting: .confirmedSuggestion
+        )
+
+        XCTAssertEqual(outcome, .rejectedProfileFull)
+        XCTAssertEqual(try repo.exemplars(profileId: profile.id).count, 1)
+    }
+
+    func testASecondSampleFromOneRecordingIsRefused() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let recording = try savedTranscription()
+        try repo.insert(
+            exemplar(
+                profileId: profile.id, embedding: makeEmbedding(index: 1),
+                sourceTranscriptionId: recording.id
+            )
+        )
+
+        let outcome = try repo.insertExemplar(
+            exemplar(
+                profileId: profile.id, embedding: makeEmbedding(index: 2),
+                sourceTranscriptionId: recording.id
+            ),
+            maxPerProfile: 5,
+            evicting: .confirmedSuggestion
+        )
+
+        XCTAssertEqual(outcome, .rejectedAlreadySampled)
+        XCTAssertEqual(try repo.exemplars(profileId: profile.id).count, 1)
+    }
+
+    /// The cap bounds stored biometric data, so it has to hold when several
+    /// callers offer samples at once. Counting from outside the transaction
+    /// lets each of them read a count below the cap and insert anyway.
+    func testTheCapHoldsUnderConcurrentInserts() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+
+        // Built up front, and only `store` and the samples cross into the
+        // closure: reaching back through `self` for a helper would capture the
+        // test case itself.
+        let store = repo!
+        let samples = (1...12).map {
+            exemplar(profileId: profile.id, embedding: makeEmbedding(index: $0))
+        }
+
+        DispatchQueue.concurrentPerform(iterations: samples.count) { index in
+            _ = try? store.insertExemplar(
+                samples[index],
+                maxPerProfile: 3,
+                evicting: .confirmedSuggestion
+            )
+        }
+
+        XCTAssertEqual(try store.exemplars(profileId: profile.id).count, 3)
+    }
+
+    /// The guard must survive on the capped path too: a sample from another
+    /// embedding model would be stored and counted while scoring against
+    /// nothing.
+    func testTheCappedInsertStillRefusesAnotherEmbeddingModel() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let other = SpeakerModelIdentity(
+            embeddingModelId: "other-model", aggregationProfileId: "test-aggregation"
+        )
+        var values = [Float](repeating: 0, count: SpeakerEmbedding.dimension)
+        values[4] = 1
+        let foreign = try XCTUnwrap(SpeakerEmbedding(rawVector: values, identity: other))
+
+        XCTAssertThrowsError(
+            try repo.insertExemplar(
+                exemplar(profileId: profile.id, embedding: foreign),
+                maxPerProfile: 5,
+                evicting: .confirmedSuggestion
+            )
+        )
+        XCTAssertTrue(try repo.exemplars(profileId: profile.id).isEmpty)
+    }
+
+    // MARK: Claiming a name
+
+    /// Two enrollments of one name can both find nothing before either writes,
+    /// so the check belongs in the transaction that creates the profile.
+    func testCreatingAProfileUnderATakenNameIsRefused() throws {
+        try repo.insert(SpeakerProfile(displayName: "Sarah", identity: identity))
+
+        XCTAssertThrowsError(
+            try repo.insert(SpeakerProfile(displayName: "  SARAH ", identity: identity))
+        ) { error in
+            XCTAssertEqual(
+                error as? SpeakerProfileStoreError,
+                .nameAlreadyTaken(normalizedName: "sarah")
+            )
+        }
+        XCTAssertEqual(try repo.profiles().count, 1)
+    }
+
+    func testCreatingAProfileWithABlankNameIsRefused() throws {
+        XCTAssertThrowsError(
+            try repo.insert(SpeakerProfile(displayName: "   ", identity: identity))
+        ) { error in
+            XCTAssertEqual(error as? SpeakerProfileStoreError, .emptyDisplayName)
+        }
+    }
+
     // MARK: Deletion
 
     func testDeletingAProfileRemovesItsExemplarsAndLinks() throws {
@@ -580,16 +732,19 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         profileId: UUID,
         embedding: SpeakerEmbedding,
         speechSeconds: Double = 20,
-        sourceTranscriptionId: UUID? = nil
+        origin: SpeakerProfileExemplar.Origin = .manualEnrollment,
+        sourceTranscriptionId: UUID? = nil,
+        createdAt: Date = Date()
     ) -> SpeakerProfileExemplar {
         SpeakerProfileExemplar(
             profileId: profileId,
             embedding: embedding,
             speechSeconds: speechSeconds,
             captureDomain: .system,
-            origin: .manualEnrollment,
+            origin: origin,
             sourceTranscriptionId: sourceTranscriptionId,
-            sourceSpeakerId: "S1"
+            sourceSpeakerId: "S1",
+            createdAt: createdAt
         )
     }
 
