@@ -468,9 +468,14 @@ public actor DiarizationService: DiarizationServiceProtocol {
     private nonisolated static let pipelineRevision = "fluidaudio-0.15.6"
 
     /// Identity of the representation `config` produces. The aggregation half
-    /// hashes every setting that can move the centroid. The per-run speaker
-    /// count is excluded on purpose: it varies call to call, and folding it in
-    /// would make a profile enrolled under a hint incomparable without one.
+    /// hashes the settings that shape the centroid, VBx refinement included,
+    /// so a FluidAudio upgrade that retunes them is caught without anyone
+    /// remembering to bump `pipelineRevision`.
+    ///
+    /// The per-run speaker count is excluded on purpose. It is derived from the
+    /// calendar attendee count, so it changes from meeting to meeting: folding
+    /// it in would make a profile cross-aggregation against its own samples and
+    /// keep tau permanently reduced by `crossAggregationPenalty`.
     /// Identity of the representation the shipping configuration produces.
     nonisolated static var defaultModelIdentity: SpeakerModelIdentity {
         modelIdentity(for: highAccuracyConfig)
@@ -489,6 +494,8 @@ public actor DiarizationService: DiarizationServiceProtocol {
             "warmStartFb=\(config.clustering.warmStartFb)",
             "zeroVoteReembed=\(config.zeroVoteReembed.enabled)",
             "zeroVoteMinDuration=\(config.zeroVoteReembed.minDurationSeconds)",
+            "vbxMaxIterations=\(config.vbx.maxIterations)",
+            "vbxConvergenceTolerance=\(config.vbx.convergenceTolerance)",
         ].joined(separator: ";")
 
         let digest = SHA256.hash(data: Data(canonical.utf8))

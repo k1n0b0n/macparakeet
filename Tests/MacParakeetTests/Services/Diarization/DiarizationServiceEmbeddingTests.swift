@@ -146,6 +146,17 @@ final class DiarizationServiceEmbeddingTests: XCTestCase {
         XCTAssertNotEqual(baseIdentity.aggregationProfileId, alteredIdentity.aggregationProfileId)
     }
 
+    func testAggregationProfileChangesWithVBxRefinement() {
+        let base = DiarizationService.highAccuracyConfig
+        var altered = base
+        altered.vbx.maxIterations += 1
+
+        XCTAssertNotEqual(
+            DiarizationService.modelIdentity(for: base).aggregationProfileId,
+            DiarizationService.modelIdentity(for: altered).aggregationProfileId
+        )
+    }
+
     /// A per-run speaker count is a caller hint, not a different representation:
     /// folding it into the identity would make a profile enrolled under a hint
     /// incomparable with the same voice heard without one.
