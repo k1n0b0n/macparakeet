@@ -144,10 +144,14 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 displayName: existing.displayName,
                 references: references
             )
-            if let distance = SpeakerVoiceprintMatcher.distance(
+            // A nil distance means the models are incomparable, which is less
+            // evidence than a far one, not more: treat it as a mismatch rather
+            // than letting it fall through into a silent merge.
+            let distance = SpeakerVoiceprintMatcher.distance(
                 from: observation, to: candidate, policy: policy
-            ), distance > policy.pollutionGuardDistance {
-                return .needsDisambiguation(existing: existing, distance: distance)
+            )
+            if distance ?? .infinity > policy.pollutionGuardDistance {
+                return .needsDisambiguation(existing: existing, distance: distance ?? 1)
             }
         }
 
@@ -242,7 +246,9 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
 
         let exemplars = try profiles.exemplarsByProfile()
         return stored.compactMap { profile in
-            let references = (exemplars[profile.id] ?? []).compactMap(reference(from:))
+            let references = (exemplars[profile.id] ?? [])
+                .sorted { $0.createdAt > $1.createdAt }
+                .compactMap(reference(from:))
             guard !references.isEmpty else { return nil }
             return SpeakerProfileCandidate(
                 profileId: profile.id,
@@ -252,8 +258,14 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         }
     }
 
+    /// Newest first: the matcher scores only the first `maxReferencesPerProfile`,
+    /// and the repository returns exemplars oldest first, so passing them
+    /// straight through would hide every sample added after the cap was reached
+    /// — the ones most likely to share the current aggregation identity.
     private func references(for profileId: UUID) throws -> [SpeakerProfileCandidate.Reference] {
-        try profiles.exemplars(profileId: profileId).compactMap(reference(from:))
+        try profiles.exemplars(profileId: profileId)
+            .sorted { $0.createdAt > $1.createdAt }
+            .compactMap(reference(from:))
     }
 
     private func reference(
@@ -329,6 +341,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 SpeakerMatchJournalEntry(
                     transcriptionId: transcriptionId,
                     speakerId: decision.speakerId,
+                    transcriptFingerprint: fingerprint.rawValue,
                     profileId: decision.profileId,
                     outcome: decision.outcome,
                     topDistance: decision.distance,

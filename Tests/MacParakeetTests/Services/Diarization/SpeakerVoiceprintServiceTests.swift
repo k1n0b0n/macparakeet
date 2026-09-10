@@ -170,6 +170,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
                 SpeakerMatchJournalEntry(
                     transcriptionId: recording.id,
                     speakerId: "S1",
+                    transcriptFingerprint: fingerprint.rawValue,
                     outcome: .noComparableProfile,
                     speechSeconds: 30,
                     createdAt: Date(timeIntervalSinceNow: -100 * 24 * 60 * 60)
@@ -191,6 +192,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
                 SpeakerMatchJournalEntry(
                     transcriptionId: recording.id,
                     speakerId: "S1",
+                    transcriptFingerprint: fingerprint.rawValue,
                     outcome: .noComparableProfile,
                     speechSeconds: 30,
                     createdAt: longAgo
@@ -322,6 +324,98 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
 
         guard case .alreadySampled = result else {
             return XCTFail("expected a refusal, got \(result)")
+        }
+        XCTAssertEqual(try profiles.exemplars(profileId: profile.id).count, 1)
+    }
+
+    /// speakerId is positional, so a decision is only joinable to the label
+    /// that answered it when the transcript version is recorded with it.
+    func testJournalRecordsTheTranscriptVersionOfEachDecision() async throws {
+        let recording = try savedTranscription()
+        _ = try await enrolledSarah(transcriptionId: recording.id)
+        let next = try savedTranscription()
+
+        _ = try await makeService().evaluate(
+            transcriptionId: next.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 14.1)]
+        )
+
+        let entries = try journal.entries(
+            retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()
+        )
+        XCTAssertEqual(entries.map(\.transcriptFingerprint), [fingerprint.rawValue])
+    }
+
+    /// Only the first `maxReferencesPerProfile` are scored, so the newest
+    /// samples must be the ones that survive the cap.
+    func testTheNewestExemplarsAreTheOnesScored() async throws {
+        let service = makeService()
+        let first = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: first.id)
+
+        // Fill the cap with samples of one voice, then add a newer one that
+        // sits on a different voice entirely.
+        for index in 1..<SpeakerMatchPolicy.v1.maxReferencesPerProfile {
+            let recording = try savedTranscription()
+            _ = try await service.enroll(
+                displayName: "Sarah",
+                observation: cluster("S\(index)", voice: 0, degrees: 0),
+                transcriptionId: recording.id,
+                allowMergeIntoExistingName: true
+            )
+        }
+        let newest = try savedTranscription()
+        _ = try await service.enroll(
+            displayName: "Sarah",
+            observation: cluster("S99", voice: 6, degrees: 0),
+            transcriptionId: newest.id,
+            allowMergeIntoExistingName: true
+        )
+        XCTAssertEqual(
+            try profiles.exemplars(profileId: profile.id).count,
+            SpeakerMatchPolicy.v1.maxReferencesPerProfile + 1
+        )
+
+        // The newest sample decides, which it could not if the cap kept the
+        // oldest ten.
+        let suggestions = try await service.evaluate(
+            transcriptionId: try savedTranscription().id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 6, degrees: 0)]
+        )
+        XCTAssertEqual(suggestions.map(\.displayName), ["Sarah"])
+    }
+
+    /// An embedding from another model carries no comparable evidence, so it
+    /// must not slip past the guard into a silent merge.
+    func testEnrollingWithAnIncomparableModelAsksInstead() async throws {
+        let first = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: first.id)
+        let second = try savedTranscription()
+
+        let otherModel = SpeakerModelIdentity(
+            embeddingModelId: "other-model",
+            aggregationProfileId: identity.aggregationProfileId
+        )
+        var values = [Float](repeating: 0, count: SpeakerEmbedding.dimension)
+        values[0] = 1
+        let observation = SpeakerClusterObservation(
+            speakerId: "S1",
+            embedding: try XCTUnwrap(SpeakerEmbedding(rawVector: values, identity: otherModel)),
+            speechSeconds: 30,
+            captureDomain: .system
+        )
+
+        let result = try await makeService().enroll(
+            displayName: "Sarah",
+            observation: observation,
+            transcriptionId: second.id,
+            allowMergeIntoExistingName: false
+        )
+
+        guard case .needsDisambiguation = result else {
+            return XCTFail("expected disambiguation, got \(result)")
         }
         XCTAssertEqual(try profiles.exemplars(profileId: profile.id).count, 1)
     }

@@ -9,6 +9,10 @@ public struct SpeakerMatchJournalEntry: Codable, Identifiable, Sendable, Equatab
     public var id: UUID
     public var transcriptionId: UUID
     public var speakerId: String
+    /// Which version of the transcript produced this decision. `speakerId` is
+    /// positional, so without it calibration cannot join a decision to the
+    /// label that answered it.
+    public var transcriptFingerprint: String
     /// The profile involved, when there was one.
     public var profileId: UUID?
     public var outcome: SpeakerMatchOutcome
@@ -21,6 +25,7 @@ public struct SpeakerMatchJournalEntry: Codable, Identifiable, Sendable, Equatab
         id: UUID = UUID(),
         transcriptionId: UUID,
         speakerId: String,
+        transcriptFingerprint: String,
         profileId: UUID? = nil,
         outcome: SpeakerMatchOutcome,
         topDistance: Double? = nil,
@@ -31,6 +36,7 @@ public struct SpeakerMatchJournalEntry: Codable, Identifiable, Sendable, Equatab
         self.id = id
         self.transcriptionId = transcriptionId
         self.speakerId = speakerId
+        self.transcriptFingerprint = transcriptFingerprint
         self.profileId = profileId
         self.outcome = outcome
         self.topDistance = topDistance

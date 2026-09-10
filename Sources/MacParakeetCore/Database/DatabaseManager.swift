@@ -2050,6 +2050,7 @@ public final class DatabaseManager: Sendable {
                     transcriptionId TEXT NOT NULL
                         REFERENCES transcriptions(id) ON DELETE CASCADE,
                     speakerId TEXT NOT NULL,
+                    transcriptFingerprint TEXT NOT NULL,
                     profileId TEXT
                         REFERENCES speaker_profiles(id) ON DELETE CASCADE,
                     outcome TEXT NOT NULL CHECK (
