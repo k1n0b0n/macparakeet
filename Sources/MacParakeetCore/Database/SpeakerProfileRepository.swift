@@ -42,6 +42,15 @@ public protocol SpeakerProfileRepositoryProtocol: Sendable {
     /// rather than `save` for a new profile: a lookup followed by `save` lets
     /// two concurrent enrollments of one name both find nothing.
     func insert(_ profile: SpeakerProfile) throws
+    /// Creates a profile and its first sample together. A racing enrollment of
+    /// the same name must not be able to observe an empty profile and skip the
+    /// pollution guard. Failures and cap refusals leave no row.
+    func insert(
+        _ profile: SpeakerProfile,
+        firstExemplar: SpeakerProfileExemplar,
+        maxPerProfile: Int,
+        evicting: SpeakerProfileExemplar.Origin
+    ) throws -> SpeakerExemplarInsertion
     func save(_ profile: SpeakerProfile) throws
     func exemplars(profileId: UUID) throws -> [SpeakerProfileExemplar]
     /// One read for a whole matching pass.
@@ -64,6 +73,34 @@ public protocol SpeakerProfileRepositoryProtocol: Sendable {
     /// Transcripts and labels already applied are untouched.
     func deleteProfile(id: UUID) throws -> Bool
     func deleteAllProfiles() throws
+}
+
+extension SpeakerProfileRepositoryProtocol {
+    /// Two writes, used only by mocks that do not own a database queue. The
+    /// concrete store overrides this with a single transaction.
+    public func insert(
+        _ profile: SpeakerProfile,
+        firstExemplar: SpeakerProfileExemplar,
+        maxPerProfile: Int,
+        evicting: SpeakerProfileExemplar.Origin
+    ) throws -> SpeakerExemplarInsertion {
+        try insert(profile)
+        do {
+            let result = try insertExemplar(
+                firstExemplar, maxPerProfile: maxPerProfile, evicting: evicting
+            )
+            switch result {
+            case .inserted, .insertedEvicting:
+                return result
+            case .rejectedAlreadySampled, .rejectedProfileFull:
+                _ = try deleteProfile(id: profile.id)
+                return result
+            }
+        } catch {
+            _ = try? deleteProfile(id: profile.id)
+            throw error
+        }
+    }
 }
 
 /// Stores enrolled voices. Persistence only — thresholds and matching policy
@@ -110,16 +147,45 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
     public func insert(_ profile: SpeakerProfile) throws {
         let profile = try normalized(profile)
         try dbQueue.write { db in
-            if try SpeakerProfile
-                .filter(Column("normalizedName") == profile.normalizedName)
-                .fetchCount(db) > 0
-            {
-                throw SpeakerProfileStoreError.nameAlreadyTaken(
-                    normalizedName: profile.normalizedName
-                )
-            }
-            try profile.insert(db)
+            try claimAndInsert(profile, db: db)
         }
+    }
+
+    /// Profile and first sample commit together, or neither does. Returning a
+    /// cap refusal from inside `write` would still commit the empty profile,
+    /// so a refused first sample deletes that row before the transaction ends.
+    public func insert(
+        _ profile: SpeakerProfile,
+        firstExemplar: SpeakerProfileExemplar,
+        maxPerProfile: Int,
+        evicting: SpeakerProfileExemplar.Origin
+    ) throws -> SpeakerExemplarInsertion {
+        let profile = try normalized(profile)
+        return try dbQueue.write { db in
+            try claimAndInsert(profile, db: db)
+            let result = try insertCappedExemplar(
+                firstExemplar, maxPerProfile: maxPerProfile, evicting: evicting, db: db
+            )
+            switch result {
+            case .inserted, .insertedEvicting:
+                return result
+            case .rejectedAlreadySampled, .rejectedProfileFull:
+                _ = try SpeakerProfile.deleteOne(db, key: profile.id)
+                return result
+            }
+        }
+    }
+
+    private func claimAndInsert(_ profile: SpeakerProfile, db: Database) throws {
+        if try SpeakerProfile
+            .filter(Column("normalizedName") == profile.normalizedName)
+            .fetchCount(db) > 0
+        {
+            throw SpeakerProfileStoreError.nameAlreadyTaken(
+                normalizedName: profile.normalizedName
+            )
+        }
+        try profile.insert(db)
     }
 
     /// Recomputes the normalized key before writing: `displayName` is mutable,
@@ -207,37 +273,57 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
         evicting: SpeakerProfileExemplar.Origin
     ) throws -> SpeakerExemplarInsertion {
         try dbQueue.write { db in
-            if let profile = try SpeakerProfile.fetchOne(db, key: exemplar.profileId),
-               profile.embeddingModelId != exemplar.embeddingModelId
-            {
-                throw SpeakerProfileStoreError.incompatibleEmbeddingModel(
-                    profile: profile.embeddingModelId,
-                    exemplar: exemplar.embeddingModelId
-                )
-            }
-
-            let existing = try SpeakerProfileExemplar
-                .filter(Column("profileId") == exemplar.profileId)
-                .order(Column("createdAt"))
-                .fetchAll(db)
-            if let sampled = exemplar.sourceTranscriptionId,
-               existing.contains(where: { $0.sourceTranscriptionId == sampled })
-            {
-                return .rejectedAlreadySampled
-            }
-
-            var evicted: UUID?
-            if existing.count >= max(0, maxPerProfile) {
-                guard let target = existing.first(where: { $0.origin == evicting }) else {
-                    return .rejectedProfileFull
-                }
-                _ = try SpeakerProfileExemplar.deleteOne(db, key: target.id)
-                evicted = target.id
-            }
-
-            try exemplar.insert(db)
-            return evicted.map { .insertedEvicting($0) } ?? .inserted
+            try insertCappedExemplar(
+                exemplar, maxPerProfile: maxPerProfile, evicting: evicting, db: db
+            )
         }
+    }
+
+    /// Zero refuses without touching stored samples. A reduced cap that the
+    /// profile already exceeds also refuses: shrinking the policy must not
+    /// silently delete several user samples to make room for one more. At the
+    /// exact cap, one eligible sample is evicted as before.
+    private func insertCappedExemplar(
+        _ exemplar: SpeakerProfileExemplar,
+        maxPerProfile: Int,
+        evicting: SpeakerProfileExemplar.Origin,
+        db: Database
+    ) throws -> SpeakerExemplarInsertion {
+        if let profile = try SpeakerProfile.fetchOne(db, key: exemplar.profileId),
+           profile.embeddingModelId != exemplar.embeddingModelId
+        {
+            throw SpeakerProfileStoreError.incompatibleEmbeddingModel(
+                profile: profile.embeddingModelId,
+                exemplar: exemplar.embeddingModelId
+            )
+        }
+
+        let existing = try SpeakerProfileExemplar
+            .filter(Column("profileId") == exemplar.profileId)
+            .order(Column("createdAt"))
+            .fetchAll(db)
+        if let sampled = exemplar.sourceTranscriptionId,
+           existing.contains(where: { $0.sourceTranscriptionId == sampled })
+        {
+            return .rejectedAlreadySampled
+        }
+
+        let cap = max(0, maxPerProfile)
+        if cap == 0 || existing.count > cap {
+            return .rejectedProfileFull
+        }
+
+        var evicted: UUID?
+        if existing.count == cap {
+            guard let target = existing.first(where: { $0.origin == evicting }) else {
+                return .rejectedProfileFull
+            }
+            _ = try SpeakerProfileExemplar.deleteOne(db, key: target.id)
+            evicted = target.id
+        }
+
+        try exemplar.insert(db)
+        return evicted.map { .insertedEvicting($0) } ?? .inserted
     }
 
     public func deleteExemplar(id: UUID) throws -> Bool {
@@ -269,13 +355,17 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
                 .filter(Column("transcriptFingerprint") == link.transcriptFingerprint)
                 .fetchOne(db)
             if let existing {
-                // A suggestion may become confirmed or dismissed, never the
-                // other way round: a second evaluation of the same transcript
-                // would otherwise erase what the user answered.
-                if link.status == .suggested, existing.status != .suggested {
-                    throw SpeakerProfileStoreError.terminalDecisionAlreadyRecorded(
-                        status: existing.status
-                    )
+                // A suggestion may become confirmed or dismissed. A terminal
+                // choice does not flip, and it does not move to another profile:
+                // repeating the same status and profile is the only no-op.
+                if existing.status != .suggested {
+                    let sameChoice =
+                        existing.status == link.status && existing.profileId == link.profileId
+                    guard sameChoice else {
+                        throw SpeakerProfileStoreError.terminalDecisionAlreadyRecorded(
+                            status: existing.status
+                        )
+                    }
                 }
                 link.createdAt = existing.createdAt
             }

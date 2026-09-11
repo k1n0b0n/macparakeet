@@ -322,6 +322,93 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         )
     }
 
+    func testAConfirmedLinkCannotBecomeDismissed() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let transcription = try savedTranscription()
+        var confirmed = link(transcriptionId: transcription.id, profileId: profile.id)
+        confirmed.status = .confirmed
+        try repo.save(confirmed)
+
+        var dismissed = link(transcriptionId: transcription.id, profileId: profile.id)
+        dismissed.status = .dismissed
+        XCTAssertThrowsError(try repo.save(dismissed)) { error in
+            XCTAssertEqual(
+                error as? SpeakerProfileStoreError,
+                .terminalDecisionAlreadyRecorded(status: .confirmed)
+            )
+        }
+        XCTAssertEqual(
+            try repo.links(transcriptionId: transcription.id, fingerprint: "fingerprint")
+                .map(\.status),
+            [.confirmed]
+        )
+    }
+
+    func testADismissedLinkCannotBecomeConfirmed() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let transcription = try savedTranscription()
+        var dismissed = link(transcriptionId: transcription.id, profileId: profile.id)
+        dismissed.status = .dismissed
+        try repo.save(dismissed)
+
+        var confirmed = link(transcriptionId: transcription.id, profileId: profile.id)
+        confirmed.status = .confirmed
+        XCTAssertThrowsError(try repo.save(confirmed)) { error in
+            XCTAssertEqual(
+                error as? SpeakerProfileStoreError,
+                .terminalDecisionAlreadyRecorded(status: .dismissed)
+            )
+        }
+        XCTAssertEqual(
+            try repo.links(transcriptionId: transcription.id, fingerprint: "fingerprint")
+                .map(\.status),
+            [.dismissed]
+        )
+    }
+
+    func testATerminalLinkCannotChangeProfile() throws {
+        let sarah = try enrolledProfile(named: "Sarah")
+        let dan = try enrolledProfile(named: "Dan")
+        let transcription = try savedTranscription()
+        var confirmed = link(transcriptionId: transcription.id, profileId: sarah.id)
+        confirmed.status = .confirmed
+        try repo.save(confirmed)
+
+        var moved = link(transcriptionId: transcription.id, profileId: dan.id)
+        moved.status = .confirmed
+        XCTAssertThrowsError(try repo.save(moved)) { error in
+            XCTAssertEqual(
+                error as? SpeakerProfileStoreError,
+                .terminalDecisionAlreadyRecorded(status: .confirmed)
+            )
+        }
+        XCTAssertEqual(
+            try repo.links(transcriptionId: transcription.id, fingerprint: "fingerprint")
+                .map(\.profileId),
+            [sarah.id]
+        )
+    }
+
+    func testRepeatingTheSameTerminalDecisionIsIdempotent() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let transcription = try savedTranscription()
+        var confirmed = link(transcriptionId: transcription.id, profileId: profile.id)
+        confirmed.status = .confirmed
+        confirmed.distance = 0.12
+        try repo.save(confirmed)
+
+        var again = link(transcriptionId: transcription.id, profileId: profile.id)
+        again.status = .confirmed
+        again.distance = 0.18
+        XCTAssertNoThrow(try repo.save(again))
+        let stored = try XCTUnwrap(
+            try repo.links(transcriptionId: transcription.id, fingerprint: "fingerprint").first
+        )
+        XCTAssertEqual(stored.status, .confirmed)
+        XCTAssertEqual(stored.profileId, profile.id)
+        XCTAssertEqual(stored.distance, 0.18, accuracy: 0.0001)
+    }
+
     /// The composite foreign key is what makes the model invariant structural
     /// rather than merely enforced in Swift.
     func testTheDatabaseItselfRefusesAMismatchedExemplarModel() throws {
@@ -420,6 +507,58 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         XCTAssertEqual(try repo.exemplars(profileId: profile.id).count, 1)
     }
 
+    func testAZeroCapRefusesWithoutDeleting() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let kept = exemplar(
+            profileId: profile.id, embedding: makeEmbedding(index: 1),
+            origin: .confirmedSuggestion
+        )
+        try repo.insert(kept)
+
+        let outcome = try repo.insertExemplar(
+            exemplar(profileId: profile.id, embedding: makeEmbedding(index: 2)),
+            maxPerProfile: 0,
+            evicting: .confirmedSuggestion
+        )
+
+        XCTAssertEqual(outcome, .rejectedProfileFull)
+        let stored = try repo.exemplars(profileId: profile.id)
+        XCTAssertEqual(stored.map(\.id), [kept.id])
+    }
+
+    /// Shrinking the cap below a profile that already exceeds it must not
+    /// silently delete several user samples just to insert one more.
+    func testAReducedCapAboveTheStoredCountRefusesWithoutDeleting() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        try repo.insert(
+            exemplar(
+                profileId: profile.id, embedding: makeEmbedding(index: 1),
+                origin: .confirmedSuggestion
+            )
+        )
+        try repo.insert(
+            exemplar(
+                profileId: profile.id, embedding: makeEmbedding(index: 2),
+                origin: .confirmedSuggestion
+            )
+        )
+        try repo.insert(
+            exemplar(
+                profileId: profile.id, embedding: makeEmbedding(index: 3),
+                origin: .confirmedSuggestion
+            )
+        )
+
+        let outcome = try repo.insertExemplar(
+            exemplar(profileId: profile.id, embedding: makeEmbedding(index: 4)),
+            maxPerProfile: 1,
+            evicting: .confirmedSuggestion
+        )
+
+        XCTAssertEqual(outcome, .rejectedProfileFull)
+        XCTAssertEqual(try repo.exemplars(profileId: profile.id).count, 3)
+    }
+
     /// The cap bounds stored biometric data, so it has to hold when several
     /// callers offer samples at once. Counting from outside the transaction
     /// lets each of them read a count below the cap and insert anyway.
@@ -434,14 +573,32 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
             exemplar(profileId: profile.id, embedding: makeEmbedding(index: $0))
         }
 
+        let lock = NSLock()
+        var outcomes: [Result<SpeakerExemplarInsertion, Error>] = []
+        outcomes.reserveCapacity(samples.count)
+
         DispatchQueue.concurrentPerform(iterations: samples.count) { index in
-            _ = try? store.insertExemplar(
-                samples[index],
-                maxPerProfile: 3,
-                evicting: .confirmedSuggestion
-            )
+            let outcome = Result {
+                try store.insertExemplar(
+                    samples[index],
+                    maxPerProfile: 3,
+                    evicting: .confirmedSuggestion
+                )
+            }
+            lock.lock()
+            outcomes.append(outcome)
+            lock.unlock()
         }
 
+        let insertions = try outcomes.map { try $0.get() }
+        let accepted = insertions.filter {
+            switch $0 {
+            case .inserted, .insertedEvicting: return true
+            case .rejectedProfileFull, .rejectedAlreadySampled: return false
+            }
+        }
+        XCTAssertEqual(accepted.count, 3)
+        XCTAssertEqual(insertions.filter { $0 == .rejectedProfileFull }.count, 9)
         XCTAssertEqual(try store.exemplars(profileId: profile.id).count, 3)
     }
 
@@ -491,6 +648,92 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? SpeakerProfileStoreError, .emptyDisplayName)
         }
+    }
+
+    func testAFailedFirstExemplarLeavesNoEmptyProfile() throws {
+        let profile = SpeakerProfile(displayName: "Sarah", identity: identity)
+        let other = SpeakerModelIdentity(
+            embeddingModelId: "other-model", aggregationProfileId: "test-aggregation"
+        )
+        var values = [Float](repeating: 0, count: SpeakerEmbedding.dimension)
+        values[4] = 1
+        let foreign = try XCTUnwrap(SpeakerEmbedding(rawVector: values, identity: other))
+
+        XCTAssertThrowsError(
+            try repo.insert(
+                profile,
+                firstExemplar: exemplar(profileId: profile.id, embedding: foreign),
+                maxPerProfile: 10,
+                evicting: .confirmedSuggestion
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SpeakerProfileStoreError,
+                .incompatibleEmbeddingModel(profile: "test-model", exemplar: "other-model")
+            )
+        }
+        XCTAssertTrue(try repo.profiles().isEmpty)
+        XCTAssertTrue(try repo.exemplars(profileId: profile.id).isEmpty)
+    }
+
+    func testAZeroCapFirstExemplarLeavesNoProfile() throws {
+        let profile = SpeakerProfile(displayName: "Sarah", identity: identity)
+        let outcome = try repo.insert(
+            profile,
+            firstExemplar: exemplar(profileId: profile.id, embedding: makeEmbedding(index: 1)),
+            maxPerProfile: 0,
+            evicting: .confirmedSuggestion
+        )
+        XCTAssertEqual(outcome, .rejectedProfileFull)
+        XCTAssertTrue(try repo.profiles().isEmpty)
+    }
+
+    func testConcurrentFirstExemplarsOfOneNameLeaveOneInitializedProfile() throws {
+        let store = repo!
+        let identity = identity
+        let attempts = (1...8).map { index -> (SpeakerProfile, SpeakerProfileExemplar) in
+            let profile = SpeakerProfile(displayName: "Sarah", identity: identity)
+            return (
+                profile,
+                exemplar(profileId: profile.id, embedding: makeEmbedding(index: min(index, 10)))
+            )
+        }
+
+        let lock = NSLock()
+        var outcomes: [Result<SpeakerExemplarInsertion, Error>] = []
+        outcomes.reserveCapacity(attempts.count)
+
+        DispatchQueue.concurrentPerform(iterations: attempts.count) { index in
+            let (profile, sample) = attempts[index]
+            let outcome = Result {
+                try store.insert(
+                    profile,
+                    firstExemplar: sample,
+                    maxPerProfile: 10,
+                    evicting: .confirmedSuggestion
+                )
+            }
+            lock.lock()
+            outcomes.append(outcome)
+            lock.unlock()
+        }
+
+        let accepted = try outcomes.compactMap { result -> SpeakerExemplarInsertion? in
+            switch result {
+            case .success(let insertion):
+                return insertion
+            case .failure(let error as SpeakerProfileStoreError):
+                guard case .nameAlreadyTaken = error else { throw error }
+                return nil
+            case .failure(let error):
+                throw error
+            }
+        }
+        XCTAssertEqual(accepted.count, 1)
+        XCTAssertEqual(try XCTUnwrap(accepted.first), .inserted)
+        XCTAssertEqual(try store.profiles().count, 1)
+        let winner = try XCTUnwrap(try store.profiles().first)
+        XCTAssertEqual(try store.exemplars(profileId: winner.id).count, 1)
     }
 
     // MARK: Deletion

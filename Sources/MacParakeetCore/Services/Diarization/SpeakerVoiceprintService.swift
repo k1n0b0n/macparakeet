@@ -68,6 +68,14 @@ public protocol SpeakerVoiceprintServicing: Sendable {
     ) async throws
 }
 
+/// Refusals the service raises before it touches stored voices.
+public enum SpeakerVoiceprintServiceError: Error, Equatable, Sendable {
+    /// The preference is off. Enrollment and decisions must not write, and
+    /// must not look like they succeeded. Pruning expired candidates stays
+    /// available so turning the feature off can still drop retained audio.
+    case disabled
+}
+
 /// Owns enrolled voices: scoring, enrolling, and recording what the user chose.
 ///
 /// A `final class` like its neighbour `SpeakerCorrectionService`, not an actor:
@@ -119,22 +127,32 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         let candidates = try profileCandidates()
         guard !candidates.isEmpty else { return [] }
 
-        // Both terminal statuses are excluded, not just refusals: rescoring a
-        // confirmed speaker would write a fresh suggestion over the answer the
-        // user already gave, and the store now refuses that outright.
-        let decided = try Set(
-            profiles.links(transcriptionId: transcriptionId, fingerprint: fingerprint.rawValue)
-                .filter { $0.status != .suggested }
-                .map(\.speakerId)
+        // Terminal clusters still compete: dropping them before scoring lets a
+        // sibling inherit the same voice with a manufactured margin. Confirmed
+        // profile ids are reserved afterwards so a second cluster cannot be
+        // assigned a name the user already gave.
+        let existingLinks = try profiles.links(
+            transcriptionId: transcriptionId, fingerprint: fingerprint.rawValue
         )
-        let scored = clusters.filter { !decided.contains($0.speakerId) }
-        guard !scored.isEmpty else { return [] }
+        let terminalSpeakerIds = Set(
+            existingLinks.filter { $0.status != .suggested }.map(\.speakerId)
+        )
+        let reservedProfileIds = Set(
+            existingLinks.filter { $0.status == .confirmed }.map(\.profileId)
+        )
 
-        let decisions = SpeakerVoiceprintMatcher.decisions(
-            clusters: scored,
+        let scored = SpeakerVoiceprintMatcher.decisions(
+            clusters: clusters,
             profiles: candidates,
             policy: policy
         )
+        let decisions = scored.map { decision in
+            publishedDecision(
+                decision,
+                terminalSpeakerIds: terminalSpeakerIds,
+                reservedProfileIds: reservedProfileIds
+            )
+        }
 
         try record(decisions, transcriptionId: transcriptionId, fingerprint: fingerprint)
         return decisions.compactMap(\.suggestion)
@@ -174,6 +192,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         fingerprint: TranscriptFingerprint,
         allowMergeIntoExistingName: Bool
     ) async throws -> SpeakerProfileEnrollment {
+        guard isEnabled() else { throw SpeakerVoiceprintServiceError.disabled }
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !SpeakerProfile.normalizedName(for: name).isEmpty else {
             return .rejectedEmptyName
@@ -199,11 +218,34 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
             updatedAt: now()
         )
         do {
-            try profiles.insert(profile)
+            switch try profiles.insert(
+                profile,
+                firstExemplar: exemplar(
+                    for: profile,
+                    observation: observation,
+                    origin: .manualEnrollment,
+                    transcriptionId: transcriptionId
+                ),
+                maxPerProfile: policy.maxReferencesPerProfile,
+                evicting: .confirmedSuggestion
+            ) {
+            case .inserted, .insertedEvicting:
+                try consumeCandidate(
+                    transcriptionId: transcriptionId,
+                    speakerId: observation.speakerId,
+                    fingerprint: fingerprint
+                )
+                return .created(profile)
+            case .rejectedAlreadySampled:
+                return .alreadySampled(profile)
+            case .rejectedProfileFull:
+                return .rejectedProfileFull(profile)
+            }
         } catch SpeakerProfileStoreError.nameAlreadyTaken {
             // Another enrollment claimed the name between the lookup and the
             // insert. The user asked for a name, not for a row, so the second
-            // one samples the winner instead of failing.
+            // one samples the winner instead of failing. The winner already
+            // holds its first sample, so the pollution guard can run.
             guard let winner = try profiles.profile(named: name) else {
                 throw SpeakerProfileStoreError.nameAlreadyTaken(
                     normalizedName: SpeakerProfile.normalizedName(for: name)
@@ -217,19 +259,6 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 allowMergeIntoExistingName: allowMergeIntoExistingName
             )
         }
-
-        _ = try addExemplar(
-            to: profile,
-            observation: observation,
-            origin: .manualEnrollment,
-            transcriptionId: transcriptionId
-        )
-        try consumeCandidate(
-            transcriptionId: transcriptionId,
-            speakerId: observation.speakerId,
-            fingerprint: fingerprint
-        )
-        return .created(profile)
     }
 
     /// Adds this voice to a profile that already exists, which is where the
@@ -302,6 +331,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         transcriptionId: UUID,
         fingerprint: TranscriptFingerprint
     ) async throws {
+        guard isEnabled() else { throw SpeakerVoiceprintServiceError.disabled }
         guard var profile = try profiles.profile(id: suggestion.profileId) else { return }
 
         try profiles.save(
@@ -323,17 +353,21 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         // one-sample-per-recording rule is the store's, so no check here.
         let exemplars = try profiles.exemplars(profileId: profile.id)
         if exemplars.filter({ $0.origin == .manualEnrollment }).count >= 2 {
-            try addExemplar(
+            switch try addExemplar(
                 to: profile,
                 observation: observation,
                 origin: .confirmedSuggestion,
                 transcriptionId: transcriptionId
-            )
-            try consumeCandidate(
-                transcriptionId: transcriptionId,
-                speakerId: suggestion.speakerId,
-                fingerprint: fingerprint
-            )
+            ) {
+            case .inserted, .insertedEvicting:
+                try consumeCandidate(
+                    transcriptionId: transcriptionId,
+                    speakerId: suggestion.speakerId,
+                    fingerprint: fingerprint
+                )
+            case .rejectedAlreadySampled, .rejectedProfileFull:
+                break
+            }
         }
 
         profile.lastMatchedAt = now()
@@ -346,6 +380,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         transcriptionId: UUID,
         fingerprint: TranscriptFingerprint
     ) async throws {
+        guard isEnabled() else { throw SpeakerVoiceprintServiceError.disabled }
         try profiles.save(
             SpeakerProfileLink(
                 transcriptionId: transcriptionId,
@@ -362,6 +397,30 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
     }
 
     // MARK: Internals
+
+    /// Matcher truth is preserved; only the published suggestion is withheld.
+    /// A dismissed closer cluster must still occupy the profile so its sibling
+    /// cannot look more confident than it was.
+    private func publishedDecision(
+        _ decision: SpeakerMatchDecision,
+        terminalSpeakerIds: Set<String>,
+        reservedProfileIds: Set<UUID>
+    ) -> SpeakerMatchDecision {
+        guard decision.outcome == .suggested else { return decision }
+        let reserved = decision.profileId.map(reservedProfileIds.contains) ?? false
+        guard terminalSpeakerIds.contains(decision.speakerId) || reserved else {
+            return decision
+        }
+        return SpeakerMatchDecision(
+            speakerId: decision.speakerId,
+            speechSeconds: decision.speechSeconds,
+            outcome: .notMutualBestMatch,
+            profileId: decision.profileId,
+            displayName: decision.displayName,
+            distance: decision.distance,
+            runnerUpDistance: decision.runnerUpDistance
+        )
+    }
 
     /// Only clusters the enrollment gate would accept are retained. A vector
     /// below it can never become an exemplar, so keeping it would be biometric
@@ -449,6 +508,24 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
     /// spares manual enrollments because `confirm` counts them to decide
     /// whether a profile may learn at all — evicting them oldest-first would
     /// drop a mature profile back below that anchor for no visible reason.
+    private func exemplar(
+        for profile: SpeakerProfile,
+        observation: SpeakerClusterObservation,
+        origin: SpeakerProfileExemplar.Origin,
+        transcriptionId: UUID?
+    ) -> SpeakerProfileExemplar {
+        SpeakerProfileExemplar(
+            profileId: profile.id,
+            embedding: observation.embedding,
+            speechSeconds: observation.speechSeconds,
+            captureDomain: observation.captureDomain,
+            origin: origin,
+            sourceTranscriptionId: transcriptionId,
+            sourceSpeakerId: observation.speakerId,
+            createdAt: now()
+        )
+    }
+
     @discardableResult
     private func addExemplar(
         to profile: SpeakerProfile,
@@ -457,15 +534,11 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         transcriptionId: UUID?
     ) throws -> SpeakerExemplarInsertion {
         try profiles.insertExemplar(
-            SpeakerProfileExemplar(
-                profileId: profile.id,
-                embedding: observation.embedding,
-                speechSeconds: observation.speechSeconds,
-                captureDomain: observation.captureDomain,
+            exemplar(
+                for: profile,
+                observation: observation,
                 origin: origin,
-                sourceTranscriptionId: transcriptionId,
-                sourceSpeakerId: observation.speakerId,
-                createdAt: now()
+                transcriptionId: transcriptionId
             ),
             maxPerProfile: policy.maxReferencesPerProfile,
             evicting: .confirmedSuggestion
