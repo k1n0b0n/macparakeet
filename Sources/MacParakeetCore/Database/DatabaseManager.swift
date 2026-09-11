@@ -1951,6 +1951,160 @@ public final class DatabaseManager: Sendable {
             }
         }
 
+        // v0.39 — Persistent speaker profiles (voiceprints). Biometric data:
+        // local-only, excluded from exports, removable.
+        // See plans/active/2026-07-03-speaker-voiceprints.md.
+        migrator.registerMigration("v0.39-speaker-voiceprints") { db in
+            try db.execute(sql: """
+                CREATE TABLE speaker_profiles (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    displayName TEXT NOT NULL CHECK (length(trim(displayName)) > 0),
+                    normalizedName TEXT NOT NULL CHECK (length(normalizedName) > 0),
+                    embeddingModelId TEXT NOT NULL,
+                    aggregationProfileId TEXT NOT NULL,
+                    createdAt TEXT NOT NULL,
+                    updatedAt TEXT NOT NULL,
+                    lastMatchedAt TEXT,
+                    lastEvaluatedAt TEXT,
+                    lastEvaluatedDistance REAL,
+                    UNIQUE (id, embeddingModelId)
+                )
+                """)
+            // On the normalized key, not `displayName COLLATE NOCASE`: NOCASE
+            // folds only ASCII, so "José" and "JOSÉ" would be distinct rows
+            // that a Unicode-aware lookup then matches both of.
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_speaker_profiles_normalized_name
+                ON speaker_profiles (normalizedName)
+                """)
+            try db.execute(sql: """
+                CREATE TABLE speaker_profile_exemplars (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    profileId TEXT NOT NULL,
+                    vector BLOB NOT NULL CHECK (length(vector) = 1024),
+                    speechSeconds REAL NOT NULL CHECK (speechSeconds > 0),
+                    captureDomain TEXT NOT NULL CHECK (
+                        captureDomain IN ('system', 'microphone', 'file')
+                    ),
+                    origin TEXT NOT NULL CHECK (
+                        origin IN ('manualEnrollment', 'confirmedSuggestion')
+                    ),
+                    embeddingModelId TEXT NOT NULL,
+                    aggregationProfileId TEXT NOT NULL,
+                    sourceTranscriptionId TEXT
+                        REFERENCES transcriptions(id) ON DELETE SET NULL,
+                    sourceSpeakerId TEXT,
+                    createdAt TEXT NOT NULL,
+                    UNIQUE (profileId, sourceTranscriptionId),
+                    -- Composite key rather than a plain reference to the id: a
+                    -- sample from another embedding model shares no space with
+                    -- the profile's, so it could be stored and shown while
+                    -- never scoring against anything. No ON UPDATE CASCADE —
+                    -- changing a profile's model must fail while samples in the
+                    -- old one exist. aggregationProfileId stays out: those
+                    -- remain comparable at a tightened threshold.
+                    FOREIGN KEY (profileId, embeddingModelId)
+                        REFERENCES speaker_profiles(id, embeddingModelId)
+                        ON DELETE CASCADE
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_speaker_profile_exemplars_profile
+                ON speaker_profile_exemplars (profileId, createdAt)
+                """)
+            // Scoped by fingerprint like speaker_corrections: after
+            // re-diarization the old rows no longer apply, so a stale dismissal
+            // cannot permanently suppress a legitimate suggestion.
+            try db.execute(sql: """
+                CREATE TABLE speaker_profile_links (
+                    transcriptionId TEXT NOT NULL
+                        REFERENCES transcriptions(id) ON DELETE CASCADE,
+                    speakerId TEXT NOT NULL,
+                    transcriptFingerprint TEXT NOT NULL,
+                    profileId TEXT NOT NULL
+                        REFERENCES speaker_profiles(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('suggested', 'confirmed', 'dismissed')
+                    ),
+                    distance REAL NOT NULL,
+                    runnerUpDistance REAL,
+                    createdAt TEXT NOT NULL,
+                    updatedAt TEXT NOT NULL,
+                    PRIMARY KEY (transcriptionId, speakerId, transcriptFingerprint)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_speaker_profile_links_profile
+                ON speaker_profile_links (profileId)
+                """)
+        }
+
+        // v0.40 — Local record of every matching decision, so thresholds can be
+        // calibrated on real post-AEC meetings. Distances joined to the label a
+        // user typed are identifying: local-only, never in a support bundle,
+        // and they expire.
+        migrator.registerMigration("v0.40-speaker-match-journal") { db in
+            try db.execute(sql: """
+                CREATE TABLE speaker_match_journal (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    transcriptionId TEXT NOT NULL
+                        REFERENCES transcriptions(id) ON DELETE CASCADE,
+                    speakerId TEXT NOT NULL,
+                    transcriptFingerprint TEXT NOT NULL,
+                    profileId TEXT
+                        REFERENCES speaker_profiles(id) ON DELETE CASCADE,
+                    outcome TEXT NOT NULL CHECK (
+                        outcome IN (
+                            'suggested', 'belowSpeechGate', 'noComparableProfile',
+                            'pastThreshold', 'marginTooSmall', 'notMutualBestMatch'
+                        )
+                    ),
+                    topDistance REAL,
+                    runnerUpDistance REAL,
+                    speechSeconds REAL NOT NULL,
+                    createdAt TEXT NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_speaker_match_journal_created
+                ON speaker_match_journal (createdAt)
+                """)
+        }
+
+        // v0.41 — Enrollment needs a vector the pipeline has already discarded:
+        // the user names a speaker days after the meeting. Written only while
+        // `rememberSpeakers` is on, never read by the matcher, promotable to an
+        // exemplar, and expiring on their own. See the 2026-09-10 amendment in
+        // plans/active/2026-07-03-speaker-voiceprints.md.
+        migrator.registerMigration("v0.41-speaker-embedding-candidates") { db in
+            try db.execute(sql: """
+                CREATE TABLE speaker_embedding_candidates (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    transcriptionId TEXT NOT NULL
+                        REFERENCES transcriptions(id) ON DELETE CASCADE,
+                    speakerId TEXT NOT NULL,
+                    transcriptFingerprint TEXT NOT NULL,
+                    vector BLOB NOT NULL CHECK (length(vector) = 1024),
+                    speechSeconds REAL NOT NULL CHECK (speechSeconds > 0),
+                    captureDomain TEXT NOT NULL CHECK (
+                        captureDomain IN ('system', 'microphone', 'file')
+                    ),
+                    embeddingModelId TEXT NOT NULL,
+                    aggregationProfileId TEXT NOT NULL,
+                    createdAt TEXT NOT NULL,
+                    -- Stored per row, not derived from a constant at read time:
+                    -- raising the window later must not resurrect vectors that
+                    -- were promised a shorter life.
+                    expiresAt TEXT NOT NULL,
+                    UNIQUE (transcriptionId, speakerId, transcriptFingerprint)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_speaker_embedding_candidates_expiry
+                ON speaker_embedding_candidates (expiresAt)
+                """)
+        }
+
         return migrator
     }
 
