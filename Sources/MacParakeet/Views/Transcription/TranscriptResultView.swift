@@ -1899,6 +1899,10 @@ struct TranscriptResultView: View {
                     }
 
                     Group {
+                        ForEach(viewModel.voiceSuggestions, id: \.speakerId) { suggestion in
+                            voiceSuggestionBanner(suggestion)
+                        }
+
                         if let conflict = viewModel.voiceEnrollmentConflict {
                             voiceEnrollmentConflictBanner(conflict)
                         } else if let offer = viewModel.pendingVoiceEnrollment {
@@ -3842,6 +3846,50 @@ struct TranscriptResultView: View {
     /// Shown above a meeting transcript that has text but no word timestamps
     /// (for example, it was transcribed with Cohere). Makes the
     /// text-only trade-off visible without promising speaker-label quality.
+    /// One proposed name, awaiting an answer. Says who it thinks it is and
+    /// leaves the decision open — a wrong name applied silently is worse than
+    /// a speaker left as "Others 1".
+    private func voiceSuggestionBanner(
+        _ suggestion: SpeakerVoiceprintSuggestion
+    ) -> some View {
+        HStack(alignment: .top, spacing: DesignSystem.Spacing.sm) {
+            Image(systemName: "person.crop.circle.badge.questionmark")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.accent)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Is \(speakerLabel(for: suggestion.speakerId)) \(suggestion.displayName)?")
+                    .font(DesignSystem.Typography.body.weight(.semibold))
+                    .foregroundStyle(DesignSystem.Colors.textPrimary)
+                Text("This voice matches a speaker you named before.")
+                    .font(DesignSystem.Typography.bodySmall)
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+            }
+
+            Spacer()
+
+            Button("Not \(suggestion.displayName)") {
+                viewModel.dismissVoiceSuggestion(suggestion)
+            }
+            .parakeetAction(.secondary)
+            .controlSize(.small)
+            Button("Yes") { viewModel.confirmVoiceSuggestion(suggestion) }
+                .parakeetAction(.primary)
+                .controlSize(.small)
+        }
+        .padding(DesignSystem.Spacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: DesignSystem.Layout.rowCornerRadius)
+                .fill(DesignSystem.Colors.accentLight)
+        )
+    }
+
+    /// The label the transcript shows, so the question names what the user can
+    /// see rather than an internal id.
+    private func speakerLabel(for speakerId: String) -> String {
+        activeTranscription.speakers?.first { $0.id == speakerId }?.label ?? "this speaker"
+    }
+
     /// Offers to remember the voice just named. Non-modal on purpose: the user
     /// came here to fix a label, and declining has to cost nothing more than
     /// ignoring it.

@@ -150,6 +150,7 @@ public final class TranscriptionViewModel {
                 // could name a different person's voice.
                 dismissVoiceEnrollment()
                 voiceEnrollmentMessage = nil
+                voiceSuggestions = []
             }
             if let currentTranscription {
                 loadSpeakerAttribution(for: currentTranscription)
@@ -1978,8 +1979,13 @@ public final class TranscriptionViewModel {
                 self.speakerCorrectionsApplied = projection.correctionsApplied
                 self.canUndoSpeakerCorrection = projection.canUndo
                 self.canRedoSpeakerCorrection = projection.canRedo
-                // The fingerprint is only known now, and a name applied in an
-                // earlier session left no offer behind.
+                // Both belong to this fingerprint, which is only known once the
+                // attribution has loaded: names the matcher proposed, and the
+                // enrollment a name applied in an earlier session never got.
+                self.loadVoiceSuggestions(
+                    transcriptionID: transcriptionID,
+                    fingerprint: projection.attribution.fingerprint
+                )
                 if let current = self.currentTranscription, current.id == transcriptionID {
                     self.reofferVoiceEnrollment(for: current)
                 }
@@ -2152,9 +2158,69 @@ public final class TranscriptionViewModel {
     /// people. The user has to say which it is.
     public private(set) var voiceEnrollmentConflict: PendingVoiceEnrollment?
 
+    /// Names the matcher proposed for this version of the transcript, awaiting
+    /// an answer. Never applied on their own.
+    public internal(set) var voiceSuggestions: [SpeakerVoiceprintSuggestion] = []
+
     public func dismissVoiceEnrollment() {
         pendingVoiceEnrollment = nil
         voiceEnrollmentConflict = nil
+    }
+
+    private func loadVoiceSuggestions(transcriptionID: UUID, fingerprint: TranscriptFingerprint) {
+        guard let speakerVoiceprints else { return }
+        Task { [weak self] in
+            let offers = try? await speakerVoiceprints.pendingSuggestions(
+                transcriptionId: transcriptionID, fingerprint: fingerprint
+            )
+            await MainActor.run {
+                // The fingerprint, not the id: re-transcribing reloads the same
+                // row, and these offers name positional speakers.
+                guard self?.speakerAttribution?.fingerprint == fingerprint else { return }
+                self?.voiceSuggestions = offers ?? []
+            }
+        }
+    }
+
+    /// Applies the name through the correction layer first, then records the
+    /// answer. That order matters: a crash between the two leaves a correct
+    /// label and a profile that did not learn, rather than a profile taught by
+    /// an answer the transcript never shows.
+    public func confirmVoiceSuggestion(_ suggestion: SpeakerVoiceprintSuggestion) {
+        guard let speakerVoiceprints,
+              let transcriptionId = currentTranscription?.id,
+              let fingerprint = speakerAttribution?.fingerprint
+        else { return }
+        guard renameSpeaker(id: suggestion.speakerId, to: suggestion.displayName) else { return }
+        voiceSuggestions.removeAll { $0.speakerId == suggestion.speakerId }
+
+        Task { [weak self] in
+            do {
+                try await speakerVoiceprints.confirm(
+                    suggestion, transcriptionId: transcriptionId, fingerprint: fingerprint
+                )
+            } catch {
+                // The label is applied and that is what the user asked for, so
+                // this is reported, not rolled back.
+                await MainActor.run {
+                    self?.voiceEnrollmentMessage = "Could not record that confirmation."
+                }
+            }
+        }
+    }
+
+    public func dismissVoiceSuggestion(_ suggestion: SpeakerVoiceprintSuggestion) {
+        guard let speakerVoiceprints,
+              let transcriptionId = currentTranscription?.id,
+              let fingerprint = speakerAttribution?.fingerprint
+        else { return }
+        voiceSuggestions.removeAll { $0.speakerId == suggestion.speakerId }
+
+        Task {
+            try? await speakerVoiceprints.dismiss(
+                suggestion, transcriptionId: transcriptionId, fingerprint: fingerprint
+            )
+        }
     }
 
     public func clearVoiceEnrollmentMessage() {
