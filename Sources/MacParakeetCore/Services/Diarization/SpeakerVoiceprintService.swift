@@ -157,15 +157,16 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
             profiles: candidates,
             policy: policy
         )
-        let decisions = scored.map { decision in
-            publishedDecision(
-                decision,
-                terminalSpeakerIds: terminalSpeakerIds,
-                reservedProfileIds: reservedProfileIds
-            )
+        // User decisions suppress publication without changing the matcher's
+        // evidence in the calibration journal.
+        let suggestions = scored.compactMap(\.suggestion).filter { suggestion in
+            !terminalSpeakerIds.contains(suggestion.speakerId)
+                && !reservedProfileIds.contains(suggestion.profileId)
         }
 
-        return try record(decisions, transcriptionId: transcriptionId, fingerprint: fingerprint)
+        return try record(
+            scored, suggestions: suggestions, transcriptionId: transcriptionId, fingerprint: fingerprint
+        )
     }
 
     // MARK: Enrollment
@@ -411,30 +412,6 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
 
     // MARK: Internals
 
-    /// Matcher truth is preserved; only the published suggestion is withheld.
-    /// A dismissed closer cluster must still occupy the profile so its sibling
-    /// cannot look more confident than it was.
-    private func publishedDecision(
-        _ decision: SpeakerMatchDecision,
-        terminalSpeakerIds: Set<String>,
-        reservedProfileIds: Set<UUID>
-    ) -> SpeakerMatchDecision {
-        guard decision.outcome == .suggested else { return decision }
-        let reserved = decision.profileId.map(reservedProfileIds.contains) ?? false
-        guard terminalSpeakerIds.contains(decision.speakerId) || reserved else {
-            return decision
-        }
-        return SpeakerMatchDecision(
-            speakerId: decision.speakerId,
-            speechSeconds: decision.speechSeconds,
-            outcome: .notMutualBestMatch,
-            profileId: decision.profileId,
-            displayName: decision.displayName,
-            distance: decision.distance,
-            runnerUpDistance: decision.runnerUpDistance
-        )
-    }
-
     /// Only clusters the enrollment gate would accept are retained. A vector
     /// below it can never become an exemplar, so keeping it would be biometric
     /// data stored for an offer the user will never be shown.
@@ -558,13 +535,14 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         )
     }
 
-    /// Pending links for suggestions, and every decision to the local journal.
+    /// Pending links for publishable suggestions, and every matcher decision
+    /// to the local journal, including matches withheld by a user decision.
     private func record(
         _ decisions: [SpeakerMatchDecision],
+        suggestions: [SpeakerVoiceprintSuggestion],
         transcriptionId: UUID,
         fingerprint: TranscriptFingerprint
     ) throws -> [SpeakerVoiceprintSuggestion] {
-        let suggestions = decisions.compactMap(\.suggestion)
         let stored = try profiles.replaceSuggestions(
             transcriptionId: transcriptionId,
             fingerprint: fingerprint.rawValue,

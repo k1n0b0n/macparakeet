@@ -164,7 +164,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         XCTAssertEqual(links.first?.profileId, profile.id)
     }
 
-    func testDismissedSpeakersAreNotScoredAgainForTheSameFingerprint() async throws {
+    func testDismissedSpeakersAreNotSuggestedAgainForTheSameFingerprint() async throws {
         let recording = try savedTranscription()
         _ = try await enrolledSarah(transcriptionId: recording.id)
         let next = try savedTranscription()
@@ -185,6 +185,11 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             clusters: [cluster("S1", voice: 0, degrees: 14.1)]
         )
         XCTAssertTrue(second.isEmpty)
+        XCTAssertEqual(
+            try profiles.links(transcriptionId: next.id, fingerprint: fingerprint.rawValue).map(\.status),
+            [.dismissed]
+        )
+        XCTAssertEqual(try journal.entries().map(\.outcome), [.suggested, .suggested])
     }
 
     /// Re-diarization changes the fingerprint, and speaker ids are positional,
@@ -530,9 +535,8 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         XCTAssertTrue(try profiles.profiles().isEmpty)
     }
 
-    /// A confirmation is as final as a refusal: rescoring would write a fresh
-    /// suggestion over the answer the user gave.
-    func testConfirmedSpeakersAreNotScoredAgain() async throws {
+    /// Re-evaluation preserves the answer while recording the matcher outcome.
+    func testConfirmedSpeakersAreNotSuggestedAgain() async throws {
         let recording = try savedTranscription()
         _ = try await enrolledSarah(transcriptionId: recording.id)
         let next = try savedTranscription()
@@ -561,6 +565,35 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
                 .map(\.status),
             [.confirmed]
         )
+        XCTAssertEqual(try journal.entries().map(\.outcome), [.suggested, .suggested])
+    }
+
+    func testJournalPreservesAMatchWithheldForAnAlreadyConfirmedProfile() async throws {
+        let enrollment = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: enrollment.id)
+        let recording = try savedTranscription()
+        try profiles.save(
+            SpeakerProfileLink(
+                transcriptionId: recording.id, speakerId: "S1",
+                transcriptFingerprint: fingerprint.rawValue, profileId: profile.id,
+                status: .confirmed, distance: 0.03
+            ))
+
+        let suggestions = try await makeService().evaluate(
+            transcriptionId: recording.id, fingerprint: fingerprint,
+            clusters: [cluster("S2", voice: 0, degrees: 14.1)]
+        )
+
+        XCTAssertTrue(suggestions.isEmpty)
+        let links = try profiles.links(transcriptionId: recording.id, fingerprint: fingerprint.rawValue)
+        XCTAssertEqual(links.map(\.speakerId), ["S1"])
+        XCTAssertEqual(links.map(\.status), [.confirmed])
+        let entries = try journal.entries()
+        XCTAssertEqual(entries.count, 1)
+        let entry = try XCTUnwrap(entries.first)
+        XCTAssertEqual(entry.speakerId, "S2")
+        XCTAssertEqual(entry.profileId, profile.id)
+        XCTAssertEqual(entry.outcome, .suggested)
     }
 
     /// 14.1° clears tau; 41.4° is exactly tau. Together they keep the margin.
@@ -601,6 +634,12 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             ["S1"]
         )
         XCTAssertFalse(links.contains { $0.speakerId == "S2" })
+        let entries = try journal.entries()
+        XCTAssertEqual(entries.filter { $0.speakerId == "S1" }.map(\.outcome), [.suggested, .suggested])
+        XCTAssertEqual(
+            entries.filter { $0.speakerId == "S2" }.map(\.outcome),
+            [.notMutualBestMatch, .notMutualBestMatch]
+        )
     }
 
     /// Dismissing the closer cluster must not manufacture a suggestion for the

@@ -186,10 +186,14 @@ final class SpeakerVoiceprintWiringTests: XCTestCase {
             ))
 
         defaults.set(true, forKey: UserDefaultsAppRuntimePreferences.meetingSpeakerDiarizationKey)
-        XCTAssertTrue(
-            UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
-                defaults: defaults, arguments: [AppFeatures.voiceProfilesDeveloperLaunchArgument]
-            ))
+        let enabledWithOverride = UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
+            defaults: defaults, arguments: [AppFeatures.voiceProfilesDeveloperLaunchArgument]
+        )
+        #if DEBUG
+        XCTAssertTrue(enabledWithOverride)
+        #else
+        XCTAssertFalse(enabledWithOverride)
+        #endif
     }
 
     func testThePreferenceIsOffUntilAsked() {
