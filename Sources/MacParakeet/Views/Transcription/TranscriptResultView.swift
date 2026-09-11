@@ -1898,6 +1898,16 @@ struct TranscriptResultView: View {
                         meetingNoWordTimestampsBanner(banner)
                     }
 
+                    if let conflict = viewModel.voiceEnrollmentConflict {
+                        voiceEnrollmentConflictBanner(conflict)
+                    } else if let offer = viewModel.pendingVoiceEnrollment {
+                        voiceEnrollmentOfferBanner(offer)
+                    }
+
+                    if let message = viewModel.voiceEnrollmentMessage {
+                        voiceEnrollmentMessageBanner(message)
+                    }
+
                     if shouldShowTranscriptAISetupBanner {
                         chatConfigurationBanner
                     }
@@ -3818,6 +3828,104 @@ struct TranscriptResultView: View {
     /// Shown above a meeting transcript that has text but no word timestamps
     /// (for example, it was transcribed with Cohere). Makes the
     /// text-only trade-off visible without promising speaker-label quality.
+    /// Offers to remember the voice just named. Non-modal on purpose: the user
+    /// came here to fix a label, and declining has to cost nothing more than
+    /// ignoring it.
+    private func voiceEnrollmentOfferBanner(
+        _ offer: TranscriptionViewModel.PendingVoiceEnrollment
+    ) -> some View {
+        HStack(alignment: .top, spacing: DesignSystem.Spacing.sm) {
+            Image(systemName: "waveform.badge.person")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.accent)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Remember \(offer.displayName)'s voice?")
+                    .font(DesignSystem.Typography.body.weight(.semibold))
+                    .foregroundStyle(DesignSystem.Colors.textPrimary)
+                Text("Later meetings will suggest this name. Suggestions always need your confirmation.")
+                    .font(DesignSystem.Typography.bodySmall)
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+            }
+
+            Spacer()
+
+            Button("Not Now") { viewModel.dismissVoiceEnrollment() }
+                .parakeetAction(.secondary)
+                .controlSize(.small)
+            Button("Remember") { viewModel.confirmVoiceEnrollment() }
+                .parakeetAction(.primary)
+                .controlSize(.small)
+        }
+        .padding(DesignSystem.Spacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: DesignSystem.Layout.rowCornerRadius)
+                .fill(DesignSystem.Colors.accentLight)
+        )
+    }
+
+    /// The name is taken by a voice that does not match. Merging would fuse two
+    /// people, so the choice is the user's and the wording says what each
+    /// option does.
+    private func voiceEnrollmentConflictBanner(
+        _ offer: TranscriptionViewModel.PendingVoiceEnrollment
+    ) -> some View {
+        HStack(alignment: .top, spacing: DesignSystem.Spacing.sm) {
+            Image(systemName: "person.2.badge.questionmark")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.warningAmber)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Another \(offer.displayName) is already saved")
+                    .font(DesignSystem.Typography.body.weight(.semibold))
+                    .foregroundStyle(DesignSystem.Colors.textPrimary)
+                Text("This voice sounds different from the \(offer.displayName) you saved before. Add it to that profile only if it is the same person.")
+                    .font(DesignSystem.Typography.bodySmall)
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+            }
+
+            Spacer()
+
+            Button("Cancel") { viewModel.dismissVoiceEnrollment() }
+                .parakeetAction(.secondary)
+                .controlSize(.small)
+            Button("Same Person") { viewModel.confirmVoiceEnrollment(allowMerge: true) }
+                .parakeetAction(.secondary)
+                .controlSize(.small)
+        }
+        .padding(DesignSystem.Spacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: DesignSystem.Layout.rowCornerRadius)
+                .fill(DesignSystem.Colors.warningAmber.opacity(0.1))
+        )
+    }
+
+    private func voiceEnrollmentMessageBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: DesignSystem.Spacing.sm) {
+            Image(systemName: "checkmark.circle")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.accent)
+
+            Text(message)
+                .font(DesignSystem.Typography.bodySmall)
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+
+            Spacer()
+
+            Button { viewModel.clearVoiceEnrollmentMessage() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(DesignSystem.Colors.textSecondary)
+        }
+        .padding(DesignSystem.Spacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: DesignSystem.Layout.rowCornerRadius)
+                .fill(DesignSystem.Colors.accentLight)
+        )
+    }
+
     private var meetingNoWordTimestampsBannerPresentation: MeetingTimedTranscriptRecoveryBannerPresentation? {
         let hasRetainedAudio =
             onRetranscribe != nil
