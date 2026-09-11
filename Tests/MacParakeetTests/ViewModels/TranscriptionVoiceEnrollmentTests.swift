@@ -75,10 +75,14 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
 
     func confirm(
         _: SpeakerVoiceprintSuggestion,
-        observation _: SpeakerClusterObservation,
         transcriptionId _: UUID,
         fingerprint _: TranscriptFingerprint
     ) async throws {}
+
+    func pendingSuggestions(
+        transcriptionId _: UUID,
+        fingerprint _: TranscriptFingerprint
+    ) async throws -> [SpeakerVoiceprintSuggestion] { [] }
 
     func dismiss(
         _: SpeakerVoiceprintSuggestion,
