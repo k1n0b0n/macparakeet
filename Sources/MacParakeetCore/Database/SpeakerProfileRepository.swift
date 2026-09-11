@@ -79,6 +79,9 @@ public protocol SpeakerProfileRepositoryProtocol: Sendable {
     ) throws -> [SpeakerProfileLink]
     /// Removes a profile with its samples and decisions in one transaction.
     /// Transcripts and labels already applied are untouched.
+    /// Recordings where this voice was accepted — what "recognized in N
+    /// recordings" counts. Suggestions and refusals are excluded.
+    func confirmedLinkCount(profileId: UUID) throws -> Int
     func deleteProfile(id: UUID) throws -> Bool
     func deleteAllProfiles() throws
 }
@@ -414,6 +417,15 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
 
     /// Exemplars and links go with it through their cascades; transcripts and
     /// any label already applied are untouched.
+    public func confirmedLinkCount(profileId: UUID) throws -> Int {
+        try dbQueue.read { db in
+            try SpeakerProfileLink
+                .filter(Column("profileId") == profileId)
+                .filter(Column("status") == SpeakerProfileLink.Status.confirmed.rawValue)
+                .fetchCount(db)
+        }
+    }
+
     public func deleteProfile(id: UUID) throws -> Bool {
         try dbQueue.write { db in
             try SpeakerProfile.deleteOne(db, key: id)
