@@ -200,6 +200,26 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
 
     // MARK: Suggestions
 
+    /// `renameSpeaker` returns as soon as the write is scheduled, and that
+    /// write can still be refused. Recording first would teach the profile
+    /// from an answer the transcript never shows.
+    func testARejectedRenameDoesNotRecordTheConfirmation() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(
+            candidate: observation(), suggestions: [suggestion()]
+        )
+        let viewModel = try await configured(
+            transcription, voiceprints: service, correctionFails: true
+        )
+        try await waitUntil { !viewModel.voiceSuggestions.isEmpty }
+
+        viewModel.confirmVoiceSuggestion(try XCTUnwrap(viewModel.voiceSuggestions.first))
+
+        // The offer comes back, since the user's answer never took effect.
+        try await waitUntil { !viewModel.voiceSuggestions.isEmpty }
+        XCTAssertTrue(service.confirmed.isEmpty)
+    }
+
     func testPendingSuggestionsLoadWithTheTranscript() async throws {
         let transcription = makeTranscription()
         let service = StubVoiceprintService(

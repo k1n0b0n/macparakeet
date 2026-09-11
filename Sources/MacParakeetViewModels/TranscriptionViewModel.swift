@@ -2180,8 +2180,15 @@ public final class TranscriptionViewModel {
         voiceEnrollmentConflict = nil
     }
 
+    /// Rises with every load, so a slower earlier one cannot overwrite what a
+    /// later one published — or republish an offer answered in between. The id
+    /// and fingerprint both match in that case, so they cannot catch it.
+    private var voiceSuggestionsLoadToken = 0
+
     private func loadVoiceSuggestions(transcriptionID: UUID, fingerprint: TranscriptFingerprint) {
         guard let speakerVoiceprints else { return }
+        voiceSuggestionsLoadToken &+= 1
+        let token = voiceSuggestionsLoadToken
         Task { [weak self] in
             let offers = try? await speakerVoiceprints.pendingSuggestions(
                 transcriptionId: transcriptionID, fingerprint: fingerprint
@@ -2191,7 +2198,8 @@ public final class TranscriptionViewModel {
                 // re-transcribing the same row, while the id covers two
                 // recordings whose words happen to hash alike — the fingerprint
                 // has no transcription in it.
-                guard self?.currentTranscription?.id == transcriptionID,
+                guard self?.voiceSuggestionsLoadToken == token,
+                      self?.currentTranscription?.id == transcriptionID,
                       self?.speakerAttribution?.fingerprint == fingerprint
                 else { return }
                 self?.voiceSuggestions = offers ?? []
@@ -2212,24 +2220,38 @@ public final class TranscriptionViewModel {
         // "Remember Sarah's voice?" for the voice just matched — and if the
         // match sits beyond the pollution guard, the conflict banner would
         // claim another Sarah exists, contradicting what was just confirmed.
-        guard renameSpeaker(
-            id: suggestion.speakerId, to: suggestion.displayName, offersEnrollment: false
-        ) else { return }
-        voiceSuggestions.removeAll { $0.speakerId == suggestion.speakerId }
-
-        Task { [weak self] in
-            do {
-                try await speakerVoiceprints.confirm(
-                    suggestion, transcriptionId: transcriptionId, fingerprint: fingerprint
-                )
-            } catch {
-                // The label is applied and that is what the user asked for, so
-                // this is reported, not rolled back.
-                await MainActor.run {
-                    self?.voiceEnrollmentMessage = .init(text: "Could not record that confirmation.", kind: .failure)
+        //
+        // The answer is recorded only once the label is actually committed:
+        // `renameSpeaker` returns as soon as the write is scheduled, and that
+        // write can still be refused for a stale revision. Recording first
+        // would teach the profile from an answer the transcript never shows.
+        let committed = renameSpeaker(
+            id: suggestion.speakerId,
+            to: suggestion.displayName,
+            offersEnrollment: false
+        ) { [weak self] committed in
+            guard committed else {
+                self?.voiceSuggestions.append(suggestion)
+                return
+            }
+            Task { [weak self] in
+                do {
+                    try await speakerVoiceprints.confirm(
+                        suggestion, transcriptionId: transcriptionId, fingerprint: fingerprint
+                    )
+                } catch {
+                    // The label is applied and that is what the user asked for,
+                    // so this is reported, not rolled back.
+                    await MainActor.run {
+                        self?.voiceEnrollmentMessage = .init(
+                            text: "Could not record that confirmation.", kind: .failure
+                        )
+                    }
                 }
             }
         }
+        guard committed else { return }
+        voiceSuggestions.removeAll { $0.speakerId == suggestion.speakerId }
     }
 
     public func dismissVoiceSuggestion(_ suggestion: SpeakerVoiceprintSuggestion) {
@@ -2418,7 +2440,8 @@ public final class TranscriptionViewModel {
     public func renameSpeaker(
         id speakerId: String,
         to newLabel: String,
-        offersEnrollment: Bool = true
+        offersEnrollment: Bool = true,
+        onCommitted: (@MainActor @Sendable (Bool) -> Void)? = nil
     ) -> Bool {
         let trimmed = newLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return true }
@@ -2446,8 +2469,10 @@ public final class TranscriptionViewModel {
             return applySpeakerCorrection(
                 .rename(speakerID: speakerId, label: trimmed),
                 onCommitted: { [weak self] committed in
+                    onCommitted?(committed)
                     // Only after the label lands, and never on the confirmation
-                    // path — that voice is already matched and recorded.
+                    // path: that voice is already matched, and the answer is
+                    // recorded by the caller.
                     guard committed,
                           offersEnrollment,
                           let renamedTranscriptionId,
