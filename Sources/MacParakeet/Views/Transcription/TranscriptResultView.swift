@@ -1898,22 +1898,8 @@ struct TranscriptResultView: View {
                         meetingNoWordTimestampsBanner(banner)
                     }
 
-                    Group {
-                        ForEach(viewModel.voiceSuggestions, id: \.speakerId) { suggestion in
-                            voiceSuggestionBanner(suggestion)
-                        }
-
-                        if let conflict = viewModel.voiceEnrollmentConflict {
-                            voiceEnrollmentConflictBanner(conflict)
-                        } else if let offer = viewModel.pendingVoiceEnrollment {
-                            voiceEnrollmentOfferBanner(offer)
-                        }
-
-                        if let message = viewModel.voiceEnrollmentMessage {
-                            voiceEnrollmentMessageBanner(message)
-                        }
-                    }
-                    .id(Self.voiceProfileBannerAnchor)
+                    voiceProfileBanners
+                        .id(Self.voiceProfileBannerAnchor)
 
                     if shouldShowTranscriptAISetupBanner {
                         chatConfigurationBanner
@@ -3846,6 +3832,26 @@ struct TranscriptResultView: View {
     /// Shown above a meeting transcript that has text but no word timestamps
     /// (for example, it was transcribed with Cohere). Makes the
     /// text-only trade-off visible without promising speaker-label quality.
+    /// Every voice-profile prompt, in one place. Grouped rather than inlined
+    /// beside the other banners: the enclosing body is already one of the
+    /// slowest getters in this file to type-check.
+    @ViewBuilder
+    private var voiceProfileBanners: some View {
+        ForEach(viewModel.voiceSuggestions, id: \.speakerId) { suggestion in
+            voiceSuggestionBanner(suggestion)
+        }
+
+        if let conflict = viewModel.voiceEnrollmentConflict {
+            voiceEnrollmentConflictBanner(conflict)
+        } else if let offer = viewModel.pendingVoiceEnrollment {
+            voiceEnrollmentOfferBanner(offer)
+        }
+
+        if let message = viewModel.voiceEnrollmentMessage {
+            voiceEnrollmentMessageBanner(message)
+        }
+    }
+
     /// One proposed name, awaiting an answer. Says who it thinks it is and
     /// leaves the decision open — a wrong name applied silently is worse than
     /// a speaker left as "Others 1".
