@@ -2148,12 +2148,25 @@ public final class TranscriptionViewModel {
         let observation: SpeakerClusterObservation
     }
 
+    /// The outcome of an answered offer. Typed because the same surface reports
+    /// successes and failures, and a failure rendered with a success icon is
+    /// worse than no feedback.
+    public struct VoiceProfileMessage: Sendable, Equatable {
+        public enum Kind: Sendable, Equatable {
+            case success
+            case failure
+        }
+
+        public let text: String
+        public let kind: Kind
+    }
+
     /// What the user is being offered, or the outcome of what they accepted.
     ///
     /// `internal(set)` so tests can stage a stale offer and prove the
     /// confirmation guard holds; views only read it.
     public internal(set) var pendingVoiceEnrollment: PendingVoiceEnrollment?
-    public private(set) var voiceEnrollmentMessage: String?
+    public private(set) var voiceEnrollmentMessage: VoiceProfileMessage?
     /// A second name already owns this voice, so accepting would merge two
     /// people. The user has to say which it is.
     public private(set) var voiceEnrollmentConflict: PendingVoiceEnrollment?
@@ -2174,9 +2187,13 @@ public final class TranscriptionViewModel {
                 transcriptionId: transcriptionID, fingerprint: fingerprint
             )
             await MainActor.run {
-                // The fingerprint, not the id: re-transcribing reloads the same
-                // row, and these offers name positional speakers.
-                guard self?.speakerAttribution?.fingerprint == fingerprint else { return }
+                // Both, because neither alone is enough: the fingerprint covers
+                // re-transcribing the same row, while the id covers two
+                // recordings whose words happen to hash alike — the fingerprint
+                // has no transcription in it.
+                guard self?.currentTranscription?.id == transcriptionID,
+                      self?.speakerAttribution?.fingerprint == fingerprint
+                else { return }
                 self?.voiceSuggestions = offers ?? []
             }
         }
@@ -2191,7 +2208,13 @@ public final class TranscriptionViewModel {
               let transcriptionId = currentTranscription?.id,
               let fingerprint = speakerAttribution?.fingerprint
         else { return }
-        guard renameSpeaker(id: suggestion.speakerId, to: suggestion.displayName) else { return }
+        // Without `offersEnrollment: false` the rename would immediately ask
+        // "Remember Sarah's voice?" for the voice just matched — and if the
+        // match sits beyond the pollution guard, the conflict banner would
+        // claim another Sarah exists, contradicting what was just confirmed.
+        guard renameSpeaker(
+            id: suggestion.speakerId, to: suggestion.displayName, offersEnrollment: false
+        ) else { return }
         voiceSuggestions.removeAll { $0.speakerId == suggestion.speakerId }
 
         Task { [weak self] in
@@ -2203,7 +2226,7 @@ public final class TranscriptionViewModel {
                 // The label is applied and that is what the user asked for, so
                 // this is reported, not rolled back.
                 await MainActor.run {
-                    self?.voiceEnrollmentMessage = "Could not record that confirmation."
+                    self?.voiceEnrollmentMessage = .init(text: "Could not record that confirmation.", kind: .failure)
                 }
             }
         }
@@ -2354,7 +2377,7 @@ public final class TranscriptionViewModel {
                 await MainActor.run { self?.publish(outcome, for: offer) }
             } catch {
                 await MainActor.run {
-                    self?.voiceEnrollmentMessage = "Could not remember this voice."
+                    self?.voiceEnrollmentMessage = .init(text: "Could not remember this voice.", kind: .failure)
                 }
             }
         }
@@ -2370,17 +2393,17 @@ public final class TranscriptionViewModel {
         else { return }
         switch outcome {
         case .created, .addedExemplar:
-            voiceEnrollmentMessage = "\(offer.displayName)'s voice will be suggested in later meetings."
+            voiceEnrollmentMessage = .init(text: "\(offer.displayName)'s voice will be suggested in later meetings.", kind: .success)
         case .alreadySampled:
-            voiceEnrollmentMessage = "\(offer.displayName) already has a sample from this recording."
+            voiceEnrollmentMessage = .init(text: "\(offer.displayName) already has a sample from this recording.", kind: .success)
         case .needsDisambiguation:
             // Deliberately not phrased as an error: the likeliest cause is two
             // people who share a first name, which is not a mistake.
             voiceEnrollmentConflict = offer
         case .rejectedTooShort:
-            voiceEnrollmentMessage = "Not enough speech from \(offer.displayName) to remember their voice."
+            voiceEnrollmentMessage = .init(text: "Not enough speech from \(offer.displayName) to remember their voice.", kind: .failure)
         case .rejectedProfileFull:
-            voiceEnrollmentMessage = "\(offer.displayName) already has the maximum number of voice samples."
+            voiceEnrollmentMessage = .init(text: "\(offer.displayName) already has the maximum number of voice samples.", kind: .failure)
         case .rejectedEmptyName:
             voiceEnrollmentMessage = nil
         }
@@ -2388,8 +2411,15 @@ public final class TranscriptionViewModel {
 
     /// Returns `false` only when the rename must be retried later because
     /// speaker corrections are still loading or saving.
+    ///
+    /// `offersEnrollment` is false when the name came from a suggestion the
+    /// user just confirmed: that voice is already matched and recorded.
     @discardableResult
-    public func renameSpeaker(id speakerId: String, to newLabel: String) -> Bool {
+    public func renameSpeaker(
+        id speakerId: String,
+        to newLabel: String,
+        offersEnrollment: Bool = true
+    ) -> Bool {
         let trimmed = newLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return true }
         if speakerCorrectionService != nil,
@@ -2414,19 +2444,23 @@ public final class TranscriptionViewModel {
             // still be refused for a stale revision — an offer accepted after
             // that would store a voice under a name the transcript never kept.
             return applySpeakerCorrection(
-                .rename(speakerID: speakerId, label: trimmed)
-            ) { [weak self] committed in
-                guard committed,
-                      let renamedTranscriptionId,
-                      let renamedFingerprint
-                else { return }
-                self?.offerVoiceEnrollment(
-                    speakerId: speakerId,
-                    displayName: trimmed,
-                    transcriptionId: renamedTranscriptionId,
-                    fingerprint: renamedFingerprint
-                )
-            }
+                .rename(speakerID: speakerId, label: trimmed),
+                onCommitted: { [weak self] committed in
+                    // Only after the label lands, and never on the confirmation
+                    // path — that voice is already matched and recorded.
+                    guard committed,
+                          offersEnrollment,
+                          let renamedTranscriptionId,
+                          let renamedFingerprint
+                    else { return }
+                    self?.offerVoiceEnrollment(
+                        speakerId: speakerId,
+                        displayName: trimmed,
+                        transcriptionId: renamedTranscriptionId,
+                        fingerprint: renamedFingerprint
+                    )
+                }
+            )
         }
         guard var transcription = currentTranscription,
             var speakers = transcription.speakers
