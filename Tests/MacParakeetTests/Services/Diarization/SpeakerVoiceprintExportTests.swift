@@ -30,10 +30,12 @@ final class SpeakerVoiceprintExportTests: XCTestCase {
         let before = try Data(contentsOf: output)
         var vector = [Float](repeating: 0, count: 256)
         vector[0] = 1
-        let embedding = try XCTUnwrap(SpeakerEmbedding(
-            rawVector: vector,
-            identity: SpeakerModelIdentity(embeddingModelId: "private-model", aggregationProfileId: "private-config")
-        ))
+        let embedding = try XCTUnwrap(
+            SpeakerEmbedding(
+                rawVector: vector,
+                identity: SpeakerModelIdentity(
+                    embeddingModelId: "private-model", aggregationProfileId: "private-config")
+            ))
         let observation = SpeakerClusterObservation(
             speakerId: "system:S1", embedding: embedding, speechSeconds: 30, captureDomain: .system
         )
@@ -49,8 +51,10 @@ final class SpeakerVoiceprintExportTests: XCTestCase {
         )
         XCTAssertEqual(suggestions.count, 1)
         try await database.dbQueue.read { db in
-            for table in ["speaker_profiles", "speaker_profile_exemplars", "speaker_profile_links",
-                          "speaker_match_journal", "speaker_embedding_candidates"] {
+            for table in [
+                "speaker_profiles", "speaker_profile_exemplars", "speaker_profile_links",
+                "speaker_match_journal", "speaker_embedding_candidates",
+            ] {
                 XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(table)"), 1, table)
             }
         }
@@ -62,7 +66,9 @@ final class SpeakerVoiceprintExportTests: XCTestCase {
             exporter.formatVTT(transcription: meeting), exporter.formatDAPT(transcription: meeting),
         ]
         for text in rendered {
-            for secret in ["VoiceprintOnlyName", "private-model", "private-config", suggestions[0].profileId.uuidString] {
+            for secret in [
+                "VoiceprintOnlyName", "private-model", "private-config", suggestions[0].profileId.uuidString,
+            ] {
                 XCTAssertFalse(text.contains(secret))
             }
         }

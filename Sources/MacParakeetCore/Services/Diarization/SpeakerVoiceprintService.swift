@@ -72,7 +72,7 @@ public protocol SpeakerVoiceprintServicing: Sendable {
 public enum SpeakerVoiceprintServiceError: Error, Equatable, Sendable {
     /// The preference is off. Enrollment and decisions must not write, and
     /// must not look like they succeeded. Pruning expired candidates stays
-    /// available so turning the feature off can still drop retained audio.
+    /// available so turning the feature off can still drop retained voice candidates.
     case disabled
 }
 

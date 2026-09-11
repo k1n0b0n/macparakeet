@@ -248,7 +248,7 @@ public enum SpeakerVoiceprintMatcher {
             // `runnerUp - best < 0` and position alone would decide.
             let runnerUp = [best.runnerUp, bestForProfile?.runnerUp].compactMap { $0 }.min()
             if let runnerUp,
-               runnerUp == best.distance || runnerUp - best.distance < policy.margin
+                runnerUp == best.distance || runnerUp - best.distance < policy.margin
             {
                 decisions.append(
                     rejection(
@@ -323,7 +323,8 @@ public enum SpeakerVoiceprintMatcher {
         for reference in profile.references.prefix(policy.maxReferencesPerProfile) {
             guard let distance = cluster.embedding.cosineDistance(to: reference.embedding) else { continue }
             let sameDomain = reference.captureDomain == cluster.captureDomain
-            let sameAggregation = reference.embedding.identity.aggregationProfileId
+            let sameAggregation =
+                reference.embedding.identity.aggregationProfileId
                 == cluster.embedding.identity.aggregationProfileId
 
             guard let current = best else {

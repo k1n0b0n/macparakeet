@@ -51,6 +51,7 @@ public protocol SpeakerProfileRepositoryProtocol: Sendable {
         maxPerProfile: Int,
         evicting: SpeakerProfileExemplar.Origin
     ) throws -> SpeakerExemplarInsertion
+    /// Updates an existing profile; a stale write cannot recreate a deleted one.
     func save(_ profile: SpeakerProfile) throws
     func exemplars(profileId: UUID) throws -> [SpeakerProfileExemplar]
     /// One read for a whole matching pass.
@@ -73,34 +74,6 @@ public protocol SpeakerProfileRepositoryProtocol: Sendable {
     /// Transcripts and labels already applied are untouched.
     func deleteProfile(id: UUID) throws -> Bool
     func deleteAllProfiles() throws
-}
-
-extension SpeakerProfileRepositoryProtocol {
-    /// Two writes, used only by mocks that do not own a database queue. The
-    /// concrete store overrides this with a single transaction.
-    public func insert(
-        _ profile: SpeakerProfile,
-        firstExemplar: SpeakerProfileExemplar,
-        maxPerProfile: Int,
-        evicting: SpeakerProfileExemplar.Origin
-    ) throws -> SpeakerExemplarInsertion {
-        try insert(profile)
-        do {
-            let result = try insertExemplar(
-                firstExemplar, maxPerProfile: maxPerProfile, evicting: evicting
-            )
-            switch result {
-            case .inserted, .insertedEvicting:
-                return result
-            case .rejectedAlreadySampled, .rejectedProfileFull:
-                _ = try deleteProfile(id: profile.id)
-                return result
-            }
-        } catch {
-            _ = try? deleteProfile(id: profile.id)
-            throw error
-        }
-    }
 }
 
 /// Stores enrolled voices. Persistence only — thresholds and matching policy
@@ -199,14 +172,14 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
         let profile = try normalized(profile)
         try dbQueue.write { db in
             if let existing = try SpeakerProfile.fetchOne(db, key: profile.id),
-               existing.embeddingModelId != profile.embeddingModelId,
-               try SpeakerProfileExemplar
-                   .filter(Column("profileId") == profile.id)
-                   .fetchCount(db) > 0
+                existing.embeddingModelId != profile.embeddingModelId,
+                try SpeakerProfileExemplar
+                    .filter(Column("profileId") == profile.id)
+                    .fetchCount(db) > 0
             {
                 throw SpeakerProfileStoreError.embeddingModelChangeWithExemplars(profile.id)
             }
-            try profile.save(db)
+            try profile.update(db)
         }
     }
 
@@ -249,7 +222,7 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
     public func insert(_ exemplar: SpeakerProfileExemplar) throws {
         try dbQueue.write { db in
             if let profile = try SpeakerProfile.fetchOne(db, key: exemplar.profileId),
-               profile.embeddingModelId != exemplar.embeddingModelId
+                profile.embeddingModelId != exemplar.embeddingModelId
             {
                 throw SpeakerProfileStoreError.incompatibleEmbeddingModel(
                     profile: profile.embeddingModelId,
@@ -264,9 +237,8 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
     /// concurrent enrollments. The caller owns the policy — how many, and which
     /// origin may be evicted — while the store owns the atomicity.
     ///
-    /// `rejectedAlreadySampled` comes from the schema's
-    /// `UNIQUE (profileId, sourceTranscriptionId)` rather than a prior read, so
-    /// the answer reflects the state the insert actually met.
+    /// `rejectedAlreadySampled` comes from the existing-row read inside the
+    /// same write transaction; the schema also enforces uniqueness.
     public func insertExemplar(
         _ exemplar: SpeakerProfileExemplar,
         maxPerProfile: Int,
@@ -290,7 +262,7 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
         db: Database
     ) throws -> SpeakerExemplarInsertion {
         if let profile = try SpeakerProfile.fetchOne(db, key: exemplar.profileId),
-           profile.embeddingModelId != exemplar.embeddingModelId
+            profile.embeddingModelId != exemplar.embeddingModelId
         {
             throw SpeakerProfileStoreError.incompatibleEmbeddingModel(
                 profile: profile.embeddingModelId,
@@ -298,12 +270,13 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
             )
         }
 
-        let existing = try SpeakerProfileExemplar
+        let existing =
+            try SpeakerProfileExemplar
             .filter(Column("profileId") == exemplar.profileId)
             .order(Column("createdAt"))
             .fetchAll(db)
         if let sampled = exemplar.sourceTranscriptionId,
-           existing.contains(where: { $0.sourceTranscriptionId == sampled })
+            existing.contains(where: { $0.sourceTranscriptionId == sampled })
         {
             return .rejectedAlreadySampled
         }
@@ -349,7 +322,8 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
     public func save(_ link: SpeakerProfileLink) throws {
         try dbQueue.write { db in
             var link = link
-            let existing = try SpeakerProfileLink
+            let existing =
+                try SpeakerProfileLink
                 .filter(Column("transcriptionId") == link.transcriptionId)
                 .filter(Column("speakerId") == link.speakerId)
                 .filter(Column("transcriptFingerprint") == link.transcriptFingerprint)
@@ -385,6 +359,10 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
 
     public func deleteAllProfiles() throws {
         try dbQueue.write { db in
+            // Candidates and unmatched decisions have no profile foreign key.
+            // The explicit global delete must remove these too, atomically.
+            _ = try SpeakerEmbeddingCandidate.deleteAll(db)
+            _ = try SpeakerMatchJournalEntry.deleteAll(db)
             _ = try SpeakerProfile.deleteAll(db)
         }
     }

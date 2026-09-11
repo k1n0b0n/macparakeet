@@ -180,12 +180,14 @@ final class SpeakerVoiceprintWiringTests: XCTestCase {
         )
 
         defaults.set(false, forKey: UserDefaultsAppRuntimePreferences.meetingSpeakerDiarizationKey)
-        XCTAssertFalse(UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
+        XCTAssertFalse(
+            UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
                 defaults: defaults, arguments: [AppFeatures.voiceProfilesDeveloperLaunchArgument]
             ))
 
         defaults.set(true, forKey: UserDefaultsAppRuntimePreferences.meetingSpeakerDiarizationKey)
-        XCTAssertTrue(UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
+        XCTAssertTrue(
+            UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
                 defaults: defaults, arguments: [AppFeatures.voiceProfilesDeveloperLaunchArgument]
             ))
     }
@@ -193,7 +195,8 @@ final class SpeakerVoiceprintWiringTests: XCTestCase {
     func testThePreferenceIsOffUntilAsked() {
         let defaults = UserDefaults(suiteName: "voiceprint-wiring-\(UUID().uuidString)")!
         defaults.set(true, forKey: UserDefaultsAppRuntimePreferences.meetingSpeakerDiarizationKey)
-        XCTAssertFalse(UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
+        XCTAssertFalse(
+            UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
                 defaults: defaults, arguments: [AppFeatures.voiceProfilesDeveloperLaunchArgument]
             ))
     }

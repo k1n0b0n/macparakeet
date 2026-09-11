@@ -120,7 +120,7 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
 
     func testNamesAreUniqueCaseInsensitively() throws {
         _ = try enrolledProfile(named: "Sarah")
-        XCTAssertThrowsError(try repo.save(SpeakerProfile(displayName: "sarah", identity: identity)))
+        XCTAssertThrowsError(try repo.insert(SpeakerProfile(displayName: "sarah", identity: identity)))
     }
 
     func testOneExemplarPerProfilePerRecording() throws {
@@ -248,7 +248,7 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
     /// whose name contains one would become unfindable after a locale change.
     func testNormalizedKeyIsIndependentOfLocale() throws {
         let profile = SpeakerProfile(displayName: "ISTANBUL", identity: identity)
-        try repo.save(profile)
+        try repo.insert(profile)
 
         XCTAssertEqual(
             SpeakerProfile.normalizedName(for: "ISTANBUL"),
@@ -263,7 +263,7 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
     func testRejectsAProfileWhoseNameNormalizesToNothing() throws {
         for blank in ["", "   ", "\n\t "] {
             XCTAssertThrowsError(
-                try repo.save(SpeakerProfile(displayName: blank, identity: identity))
+                try repo.insert(SpeakerProfile(displayName: blank, identity: identity))
             ) { error in
                 XCTAssertEqual(error as? SpeakerProfileStoreError, .emptyDisplayName)
             }
@@ -868,7 +868,7 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         // SQLite's NOCASE folds only ASCII, so this is the case that would
         // silently create a second profile for the same person.
         let profile = SpeakerProfile(displayName: "José", identity: identity)
-        try repo.save(profile)
+        try repo.insert(profile)
         XCTAssertEqual(try repo.profile(named: "josé")?.id, profile.id)
         XCTAssertEqual(try repo.profile(named: "JOSÉ")?.id, profile.id)
     }
@@ -877,13 +877,13 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
     /// two rows can exist that a lookup considers equal and picks between at
     /// random.
     func testNonAsciiCaseVariantsCannotBothBeStored() throws {
-        try repo.save(SpeakerProfile(displayName: "José", identity: identity))
-        XCTAssertThrowsError(try repo.save(SpeakerProfile(displayName: "JOSÉ", identity: identity)))
+        try repo.insert(SpeakerProfile(displayName: "José", identity: identity))
+        XCTAssertThrowsError(try repo.insert(SpeakerProfile(displayName: "JOSÉ", identity: identity)))
     }
 
     func testRenamingAProfileMovesItsLookupKey() throws {
         var profile = SpeakerProfile(displayName: "Sarah", identity: identity)
-        try repo.save(profile)
+        try repo.insert(profile)
 
         profile.displayName = "Sarah Chen"
         try repo.save(profile)
@@ -891,12 +891,12 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         XCTAssertEqual(try repo.profile(named: "sarah chen")?.id, profile.id)
         XCTAssertNil(try repo.profile(named: "Sarah"))
         // The old key must not keep enforcing uniqueness either.
-        XCTAssertNoThrow(try repo.save(SpeakerProfile(displayName: "Sarah", identity: identity)))
+        XCTAssertNoThrow(try repo.insert(SpeakerProfile(displayName: "Sarah", identity: identity)))
     }
 
     func testLookupIgnoresSurroundingWhitespace() throws {
         let profile = SpeakerProfile(displayName: "Sarah", identity: identity)
-        try repo.save(profile)
+        try repo.insert(profile)
         XCTAssertEqual(try repo.profile(named: "  sarah  ")?.id, profile.id)
     }
 
@@ -906,8 +906,8 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
     func testAccentsDistinguishNames() throws {
         let plain = SpeakerProfile(displayName: "Jose", identity: identity)
         let accented = SpeakerProfile(displayName: "José", identity: identity)
-        try repo.save(plain)
-        try repo.save(accented)
+        try repo.insert(plain)
+        try repo.insert(accented)
         XCTAssertEqual(try repo.profile(named: "jose")?.id, plain.id)
         XCTAssertEqual(try repo.profile(named: "josé")?.id, accented.id)
     }
@@ -961,7 +961,7 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
 
     private func enrolledProfile(named name: String) throws -> SpeakerProfile {
         let profile = SpeakerProfile(displayName: name, identity: identity)
-        try repo.save(profile)
+        try repo.insert(profile)
         return profile
     }
 

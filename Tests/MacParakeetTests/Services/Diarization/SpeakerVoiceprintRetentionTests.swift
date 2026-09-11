@@ -89,13 +89,14 @@ private struct RetentionFixture {
 
         var vector = [Float](repeating: 0, count: SpeakerEmbedding.dimension)
         vector[0] = 1
-        let embedding = try XCTUnwrap(SpeakerEmbedding(
-            rawVector: vector,
-            identity: SpeakerModelIdentity(
-                embeddingModelId: "test-model",
-                aggregationProfileId: "test-aggregation"
-            )
-        ))
+        let embedding = try XCTUnwrap(
+            SpeakerEmbedding(
+                rawVector: vector,
+                identity: SpeakerModelIdentity(
+                    embeddingModelId: "test-model",
+                    aggregationProfileId: "test-aggregation"
+                )
+            ))
 
         // Seed persisted rows directly so already-expired data survives until
         // the app lifecycle starts. One row per store expires at the next tick.

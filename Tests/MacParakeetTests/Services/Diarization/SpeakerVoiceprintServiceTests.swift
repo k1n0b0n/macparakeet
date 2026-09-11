@@ -40,7 +40,8 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         )
 
         XCTAssertTrue(suggestions.isEmpty)
-        XCTAssertTrue(try journal.entries(retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()).isEmpty)
+        XCTAssertTrue(
+            try journal.entries(retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()).isEmpty)
         XCTAssertTrue(try profiles.links(transcriptionId: recording.id, fingerprint: fingerprint.rawValue).isEmpty)
     }
 
@@ -140,7 +141,8 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         )
 
         XCTAssertTrue(suggestions.isEmpty)
-        XCTAssertTrue(try journal.entries(retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()).isEmpty)
+        XCTAssertTrue(
+            try journal.entries(retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()).isEmpty)
     }
 
     // MARK: Evaluation
@@ -226,7 +228,9 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         )
 
         let outcomes = Dictionary(
-            uniqueKeysWithValues: try journal.entries(retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()).map { ($0.speakerId, $0.outcome) }
+            uniqueKeysWithValues: try journal.entries(
+                retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()
+            ).map { ($0.speakerId, $0.outcome) }
         )
         XCTAssertEqual(outcomes["S1"], .suggested)
         XCTAssertEqual(outcomes["S2"], .pastThreshold)
@@ -267,7 +271,8 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             retention: SpeakerMatchJournalRepository.defaultRetention,
             now: Date()
         )
-        XCTAssertTrue(try journal.entries(retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()).isEmpty)
+        XCTAssertTrue(
+            try journal.entries(retention: SpeakerMatchJournalRepository.defaultRetention, now: Date()).isEmpty)
     }
 
     /// Expiry cannot ride on writes alone: a user who stops recording stops
@@ -771,18 +776,21 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         let second = try savedTranscription()
         let service = makeService()
 
+        let firstObservation = cluster("S1", voice: 0, degrees: 0)
+        let secondObservation = cluster("S2", voice: 4, degrees: 0)
+        let transcriptFingerprint = fingerprint
         async let left = service.enroll(
             displayName: "Sarah",
-            observation: cluster("S1", voice: 0, degrees: 0),
+            observation: firstObservation,
             transcriptionId: first.id,
-            fingerprint: fingerprint,
+            fingerprint: transcriptFingerprint,
             allowMergeIntoExistingName: false
         )
         async let right = service.enroll(
             displayName: "Sarah",
-            observation: cluster("S2", voice: 4, degrees: 0),
+            observation: secondObservation,
             transcriptionId: second.id,
-            fingerprint: fingerprint,
+            fingerprint: transcriptFingerprint,
             allowMergeIntoExistingName: false
         )
         let results = [try await left, try await right]
@@ -790,11 +798,19 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         XCTAssertEqual(try profiles.profiles().count, 1)
         let profile = try XCTUnwrap(try profiles.profiles().first)
         XCTAssertEqual(try profiles.exemplars(profileId: profile.id).count, 1)
-        XCTAssertTrue(results.contains { if case .created = $0 { return true }; return false })
         XCTAssertTrue(
-            results.contains { if case .needsDisambiguation = $0 { return true }; return false }
+            results.contains {
+                if case .created = $0 { return true }; return false
+            })
+        XCTAssertTrue(
+            results.contains {
+                if case .needsDisambiguation = $0 { return true }; return false
+            }
         )
-        XCTAssertFalse(results.contains { if case .addedExemplar = $0 { return true }; return false })
+        XCTAssertFalse(
+            results.contains {
+                if case .addedExemplar = $0 { return true }; return false
+            })
     }
 
     // MARK: Enrollment candidates

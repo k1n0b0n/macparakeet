@@ -20,9 +20,10 @@ final class VoiceProfileFeatureGateTests: XCTestCase {
         defaults.set(true, forKey: UserDefaultsAppRuntimePreferences.rememberSpeakersKey)
         defaults.set(true, forKey: UserDefaultsAppRuntimePreferences.meetingSpeakerDiarizationKey)
         defaults.set(Date(), forKey: UserDefaultsAppRuntimePreferences.voiceprintConsentAcknowledgedAtKey)
-        XCTAssertFalse(UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
-            defaults: defaults, arguments: []
-        ))
+        XCTAssertFalse(
+            UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
+                defaults: defaults, arguments: []
+            ))
         let withOverride = UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
             defaults: defaults, arguments: ["--enable-voice-profiles"]
         )
