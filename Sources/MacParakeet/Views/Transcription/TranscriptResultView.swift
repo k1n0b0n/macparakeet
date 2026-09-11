@@ -3866,7 +3866,8 @@ struct TranscriptResultView: View {
     /// Whether any prompt is waiting. Checked before resolving placements: the
     /// resolver walks the turn list, and it runs once per rendered card.
     private var hasVoiceProfileBanner: Bool {
-        viewModel.voiceEnrollmentConflict != nil
+        !viewModel.voiceSuggestions.isEmpty
+            || viewModel.voiceEnrollmentConflict != nil
             || viewModel.pendingVoiceEnrollment != nil
             || viewModel.voiceEnrollmentMessage != nil
     }
@@ -3906,6 +3907,7 @@ struct TranscriptResultView: View {
     /// the view builder stays a plain series of `if`s — this file's view bodies
     /// are already among the slowest to type-check.
     private struct VoiceProfileBannerSet {
+        var suggestions: [SpeakerVoiceprintSuggestion] = []
         var conflict: TranscriptionViewModel.PendingVoiceEnrollment?
         var offer: TranscriptionViewModel.PendingVoiceEnrollment?
         var message: String?
@@ -3916,6 +3918,9 @@ struct TranscriptResultView: View {
     ) -> VoiceProfileBannerSet {
         var set = VoiceProfileBannerSet()
         guard hasVoiceProfileBanner else { return set }
+        set.suggestions = viewModel.voiceSuggestions.filter {
+            voiceProfileBannerPlacement(forSpeaker: $0.speakerId) == placement
+        }
         if let conflict = viewModel.voiceEnrollmentConflict {
             if voiceProfileBannerPlacement(forSpeaker: conflict.speakerId) == placement {
                 set.conflict = conflict
@@ -3936,6 +3941,9 @@ struct TranscriptResultView: View {
     @ViewBuilder
     private func voiceProfileBanners(at placement: VoiceProfileBannerPlacement) -> some View {
         let set = voiceProfileBannerSet(at: placement)
+        ForEach(set.suggestions, id: \.speakerId) { suggestion in
+            voiceSuggestionBanner(suggestion)
+        }
         if let conflict = set.conflict {
             voiceEnrollmentConflictBanner(conflict)
         } else if let offer = set.offer {
@@ -3944,6 +3952,54 @@ struct TranscriptResultView: View {
         if let message = set.message {
             voiceEnrollmentMessageBanner(message)
         }
+    }
+
+    /// One proposed name, awaiting an answer. Says who it thinks it is and
+    /// leaves the decision open — a wrong name applied silently is worse than
+    /// a speaker left as "Others 1".
+    private func voiceSuggestionBanner(
+        _ suggestion: SpeakerVoiceprintSuggestion
+    ) -> some View {
+        HStack(alignment: .top, spacing: DesignSystem.Spacing.sm) {
+            Image(systemName: "person.crop.circle.badge.questionmark")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.accent)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Is \(speakerLabel(for: suggestion.speakerId)) \(suggestion.displayName)?")
+                    .font(DesignSystem.Typography.body.weight(.semibold))
+                    .foregroundStyle(DesignSystem.Colors.textPrimary)
+                Text("This voice matches a speaker you named before.")
+                    .font(DesignSystem.Typography.bodySmall)
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+            }
+
+            Spacer()
+
+            Button("Not \(suggestion.displayName)") {
+                voiceProfileMessageSpeakerID = suggestion.speakerId
+                viewModel.dismissVoiceSuggestion(suggestion)
+            }
+            .parakeetAction(.secondary)
+            .controlSize(.small)
+            Button("Yes") {
+                voiceProfileMessageSpeakerID = suggestion.speakerId
+                viewModel.confirmVoiceSuggestion(suggestion)
+            }
+            .parakeetAction(.primary)
+            .controlSize(.small)
+        }
+        .padding(DesignSystem.Spacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: DesignSystem.Layout.rowCornerRadius)
+                .fill(DesignSystem.Colors.accentLight)
+        )
+    }
+
+    /// The label the transcript shows, so the question names what the user can
+    /// see rather than an internal id.
+    private func speakerLabel(for speakerId: String) -> String {
+        activeTranscription.speakers?.first { $0.id == speakerId }?.label ?? "this speaker"
     }
 
     /// Offers to remember the voice just named. Non-modal on purpose: the user
