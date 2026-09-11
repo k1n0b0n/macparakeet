@@ -1,15 +1,15 @@
 # Persistent Speaker Profiles (Voiceprints) — Research Synthesis + Implementation Plan
 
-- **Date:** 2026-07-03 (amended 2026-09-09 — see
-  [Amendment](#amendment-2026-09-09))
-- **Status:** READY TO IMPLEMENT. Phase 0: NO-GO on the July meeting corpus
+- **Date:** 2026-07-03 (amended 2026-09-09; integration and release decision
+  2026-09-10 — see [Release gates](#integration-and-release-gates-2026-09-10))
+- **Status:** EXPERIMENTAL FOUNDATIONS, DISABLED BY DEFAULT. Phase 0: NO-GO on the July meeting corpus
   (pre-AEC echo contamination + only 3 usable sessions). Phase 0b (clean public
   corpus): **GO — embedding path validated** (no overlap: same-narrator
   0.05–0.23 vs different 0.47–0.84; tau/margin sweep = 100% TPR, 0% FPR across
-  a 0.25–0.45 plateau). Phase 1 is **no longer corpus-blocked**: the 2026-09-09
-  amendment replaces the "collect a post-AEC corpus first" gate with a local
-  decision journal that produces a labelled corpus from dogfooding, so code can
-  land behind a disabled flag while the product tau is confirmed. See
+  a 0.25–0.45 plateau). Phase 1 implementation can land behind the disabled
+  `AppFeatures.voiceProfilesEnabled` gate. The journal supports calibration and
+  dogfooding; official release still requires held-out real-meeting evidence.
+  No real-meeting accuracy benchmark or release gate is claimed complete. See
   `docs/research/2026-07-04-voiceprints-phase0-calibration.md` and
   `docs/research/2026-07-04-voiceprints-phase0b-clean-corpus.md`.
 - **Trigger:** issue #662 (yakov0922) + a Reddit voiceprint post aimed at MacWhisper;
@@ -22,15 +22,69 @@
   (names "speaker memory" as the gap; this plan is its identity layer, made concrete)
   and [`plans/active/2026-05-speaker-diarization-quality.md`](2026-05-speaker-diarization-quality.md)
 
+## Integration and release gates (2026-09-10)
+
+Daniel authorized reviewing, fixing and integrating the existing PR series into
+`main` behind an experimental flag, with official release conditional on good test
+results. This decision separates two gates; it supersedes any wording below that
+treats the journal as a substitute for a real-meeting evaluation.
+
+**Implementation and dogfooding gate:** review the combined dependency stack,
+verify migrations and focused tests for embeddings, matching, profile/candidate
+storage, consent and feature gating, deletion, expiry and export exclusion, and
+complete the repository's final verification. `AppFeatures.voiceProfilesEnabled`
+remains `false`. A DEBUG build may opt in with `--enable-voice-profiles` through
+`AppFeatures.isVoiceProfilesAvailable(arguments:)`; release builds ignore that
+argument. Availability alone grants no consent: the separate `rememberSpeakers`
+preference remains off by default and requires acknowledged consent and meeting
+speaker detection. PRs #994/#996/#1000/#1001/#1004/#1005 supply foundations and
+meeting wiring, not the consent, enrollment, suggestion or administration UI.
+Those surfaces must be complete before ordinary user dogfooding or release.
+
+**Official release gate:** publish a reviewable evaluation report for the exact
+model, aggregation settings, policy and build being considered. The report must:
+
+- Separate enrollment meetings, calibration meetings and held-out evaluation
+  meetings. Do not split clusters from the same recording across these sets.
+  Freeze profiles and policy before evaluating held-out meetings; any tuning or
+  learning from them requires a new held-out evaluation.
+- Set numeric acceptance criteria and minimum evidence requirements **before**
+  the final evaluation: suggestion precision, useful coverage, false matches of
+  unknown participants, sample sizes and uncertainty. A 99% suggestion-precision
+  target is exploratory; it is neither certified accuracy nor an accepted release
+  threshold without that documented decision.
+- Report suggestions **before user correction**: correct/incorrect suggestion
+  counts and precision, coverage of known speakers, unknown-speaker false matches
+  with their denominator, abstentions and uncertainty. Report both denominators
+  and missing/ambiguous labels; a small zero-error sample is insufficient evidence
+  of high precision.
+- Use independently checked identities and cluster attribution. User confirmations
+  and typed names are reviewable feedback, not unquestioned ground truth; a
+  suggestion may influence a confirmation and a cluster may contain two people.
+- Include separate meetings with changed microphones/capture conditions, unknown
+  participants, overlapping and brief speech, and cluster contamination. Document
+  where matching cannot repair diarization and which inputs are excluded.
+- Measure added processing time, memory and retained-data costs on the meeting
+  path, and verify the consent, correction, deletion and expiry flows in the app.
+
+The local journal helps find failures and calibrate policy; it does not supply
+independent identity labels or all required evaluation measurements by itself.
+No fixed number of dogfooded meetings automatically passes this gate. Enabling
+the release flag and publishing a stable build are subsequent explicit release
+decisions; merging foundations into `main` does neither.
+
+The current internal boundary is specified in
+[`spec/contracts/speaker-voiceprints.md`](../../spec/contracts/speaker-voiceprints.md).
+
 ## Amendment (2026-09-09)
 
-Re-verified against `main` (FluidAudio 0.15.6, speaker-correction layer shipped
+Re-verified against `main` (FluidAudio 0.15.6, speaker-correction layer merged
 in [PR #960](https://github.com/moona3k/macparakeet/pull/960)). Six errors, three
 additions. Corrections are applied in place below.
 
 **Scope locked:** meetings only · `rememberSpeakers` off by default and gated on
-acknowledged consent · tau is a compiled constant with a hidden `UserDefaults`
-override, never a user setting · calibration via a local decision journal, not an
+acknowledged consent · tau is an experimental compiled policy constant, never a
+user setting (a hidden calibration override remains proposed) · calibration via a local decision journal, not an
 on-demand re-diarization · literal #662 ask (recurring unknowns) out of scope, no
 columns, no follow-up · permanent vectors only for enrolled people, plus short-lived
 enrollment candidates that are never compared to each other (decision 9) · vectors as
@@ -95,27 +149,31 @@ us without wiring a second manager. Out of scope.
 2. **Pollution guard on name-based enrollment.** Renaming to "Sarah" bypasses
    every threshold — two colleagues or one misclick merges two voices. Beyond 0.45
    from the existing profile, ask instead of merging.
-3. **Decision journal replaces the corpus gate.** Log each decision locally
-   (distances, gates, outcome, the label the user finally types); ~20 dogfooded
-   meetings yield a labelled post-AEC corpus whose ground truth is what the user
-   wrote. Diagnostic embeddings are ephemeral and never persisted as profiles.
+3. **Decision journal supports calibration and dogfooding.** Log decisions locally
+   (distances, gates and outcomes), and relate them to reviewed speaker corrections
+   using the transcript fingerprint. This permits implementation behind the disabled
+   flag; it does not replace the held-out release evaluation above. The journal
+   stores neither vectors nor independent identity labels. Enrollment candidates
+   and explicitly enrolled exemplars have separate lifecycles below.
    Lifecycle, since distances joined to labels are identifying:
    - **Owner:** `SpeakerVoiceprintService`, the only writer. No other component
      appends to it.
    - **Location:** a table in the user database, not a loose file — so it inherits
      the existing user-data deletion rules instead of needing its own.
-   - **Retention:** 90 days, pruned on write. It exists to calibrate, not to
-     accumulate; a rolling window is more than the ~20 meetings the calibration needs.
+   - **Retention:** 90 days, pruned on reads, writes, app startup and hourly while
+     the app runs, even if the feature has since been disabled. If the app is shut
+     down, cleanup resumes at the next launch. Expired entries are never returned.
    - **Never leaves the machine:** excluded from exports, diagnostics and support
      bundles, like the profile tables.
    - **Deletion:** rows are purged atomically with whatever they reference — deleting
      a profile, a transcription, or all voice profiles takes its journal rows with it
      in the same transaction. No orphan row outlives its subject.
 
-**Threshold:** start at `tau = 0.25`, not 0.30. The zero-FPR plateau runs
+**Experimental threshold:** start at `tau = 0.25`, not 0.30. The zero-FPR plateau runs
 0.25–0.45 and the worst positive is 0.227, so 0.25 still accepts 21/21 while
-buying margin against noisier post-AEC audio. A missed suggestion is a non-event;
-a false one is the worst outcome this research documented.
+leaving room for calibration on post-AEC audio. This clean-corpus observation does
+not establish precision or useful coverage on meetings. A false suggestion is the
+costlier error; abstention and missed suggestions still count against coverage.
 
 ## Verdict
 
@@ -125,7 +183,8 @@ exists or arrives free:
 - FluidAudio's offline diarizer already returns a **256-d WeSpeaker embedding per
   detected speaker** (`DiarizationResult.speakerDatabase` — the un-normalized VBx
   clustering centroid; there is no per-segment vector, see Amendment 1-2). No new
-  model, no new runtime, no added latency.
+  model or embedding inference pass. Added matching and storage costs still need
+  measurement on the meeting path.
 - The 2026-06-14 architecture plan already defines the guardrails (suggestions never
   silently rewrite; wrong automatic names are worse than anonymous speakers; profiles
   must be deletable; don't grow `SpeakerInfo` into a pseudo-profile).
@@ -134,11 +193,11 @@ exists or arrives free:
   Apple: none. **On-device voiceprints are open competitive whitespace** aligned
   with the private-speech-memory north star.
 
-Two real risks, both handled: (a) embedding separation quality on compressed meeting
-system audio → Phase 0 calibration spike before any product code; (b) biometric
-privacy → strict enrollment-only scope + consent gate + deletion controls.
+Two unresolved risks govern release: embedding separation quality on compressed
+meeting system audio requires held-out evaluation; biometric retention requires
+consent, bounded candidate storage and verified deletion controls.
 
-## What exists today (repo-dive report)
+## Repository context recorded in research
 
 - Diarization is centralized: `DiarizationService.diarize(audioURL:)`
   (`Sources/MacParakeetCore/Services/Diarization/DiarizationService.swift:101-157`),
@@ -178,7 +237,7 @@ transplant them onto WeSpeaker. Hence Phase 0.
 
 ## Design
 
-### Product shape (v1)
+### Product shape (v1; UI still planned)
 
 Enrollment flywheel, correction-based (the Otter/Circleback pattern, minus cloud):
 
@@ -197,20 +256,23 @@ Enrollment flywheel, correction-based (the Otter/Circleback pattern, minus cloud
 5. Confirmation applies the label via the existing rename path. Adding that
    meeting's embedding as a new profile sample is part of the confirm action's
    *disclosed* semantics ("Confirm and improve Sarah's voice profile") — samples
-   are only ever added to already-enrolled profiles via this explicit act.
+   are only ever added to already-enrolled profiles via this explicit act, after
+   two manual enrollments anchor the profile and subject to duration and cap rules.
+   A confirmed label does not imply a new exemplar was accepted.
 6. Unknowns stay "Others N". Below-margin matches stay unknown ("wrong automatic
    names are worse than anonymous speakers").
 
-Scope call: v1 keeps two kinds of vector, and the difference is the whole privacy
-argument.
+Scope call: the experimental design keeps two kinds of vector, both sensitive.
 
 - **Profile exemplars** are permanent and belong to a named person. Only an explicit
   enrollment or a confirmed suggestion creates one.
 - **Enrollment candidates** (Amendment, decision 9) are short-lived and belong to no
-  one. Step 1 above happens after the meeting, when the vector has already been
-  discarded, so without them nothing can be named at all. They are consent-gated,
-  capped at seven days, deleted on promotion or with their recording, and **never
-  compared against each other**.
+  one. They make enrollment possible after the meeting without re-running
+  diarization. Ordinary transcript renaming does not require a retained vector.
+  Candidates are consent-gated, capped at seven days, deleted on successful
+  promotion or with their recording, and **never compared against each other**.
+  Expiry is enforced on reads/writes, startup and hourly while the app runs,
+  including when the feature is disabled; after shutdown it resumes next launch.
 
 That last property is what keeps the issue's literal ask — "this voice appeared in 5
 recordings, name them?" — out of scope: answering it means comparing unenrolled
@@ -222,7 +284,7 @@ a separate opt-in, decided later.
 - Open-set, **mutual best match** (Amendment, Addition 1): suggest only if
   `top1 distance ≤ τ`, the margin holds on **both** sides (`top2 − top1 ≥ margin`
   for the cluster *and* for the profile), and each is the other's best match.
-  Ship values: τ = 0.25, margin = 0.10.
+  Experimental values: τ = 0.25, margin = 0.10; subject to the release gate above.
 - **Singleton sides:** when a side has no second candidate (one enrolled profile, or
   one detected cluster) the margin is **vacuously satisfied**, not failed — the
   decision rests on τ alone. Failing it instead would make the feature unusable
@@ -231,13 +293,16 @@ a separate opt-in, decided later.
   pair is rejected. No tie-break by id, insertion order, or recency — an arbitrary
   winner is precisely the "wrong automatic name" the invariant forbids. Both cases
   need explicit fixtures (singleton profile set, singleton cluster set, exact tie).
-- Duration gates: embed only clean non-overlapped speech; per-speaker aggregate ≥3s
-  usable, profile needs ≥15s total across ≥3 turns before it may suggest; never
-  learn from <2s backchannels (snap those to the surrounding turn's label instead).
+- Current duration gates use per-cluster aggregate speech: ≥3s to match and ≥15s
+  to enroll or retain a candidate. The implementation does **not** filter clean
+  non-overlapped spans, require three turns, or snap short backchannels to another
+  label. The upstream vector is a whole-cluster centroid. Clean-span selection
+  and contaminated-cluster rejection remain evaluation/design work; duration alone
+  does not establish a clean enrollment sample.
 - Profiles: K ≤ 10 raw reference embeddings, **no stored centroid** (Amendment).
   Scoring is expressed in **cosine distance throughout**, so a profile scores as the
   **minimum** distance over its exemplars — the same rule the July text stated as
-  "max over references" in similarity terms, restated in the shipping metric to
+  "max over references" in similarity terms, restated in the implemented metric to
   remove the contradiction. It preserves per-channel modes either way. A centroid may
   be computed on the fly for display, never for scoring; samples added only on user confirmation
   (no silent EMA — poisoning/drift). **At most one sample per profile per
@@ -261,8 +326,11 @@ a separate opt-in, decided later.
 - **New GRDB migration `v0.39-speaker-voiceprints` + 3 tables** (raw SQL, style of
   `v0.32-speaker-corrections`, `DatabaseManager.swift:1374-1422`), joined by the
   decision journal in `v0.40` and enrollment candidates in `v0.41` (below):
-  - `speaker_profiles`: id, displayName (`UNIQUE … COLLATE NOCASE`, so a second
-    rename to "Sarah" adds an exemplar instead of a duplicate), embeddingModelId,
+  - `speaker_profiles`: id, displayName and a unique `normalizedName` used by both
+    lookup and the database index (trim whitespace; Unicode case/width folding;
+    preserve accents). This is not SQLite's ASCII-only `COLLATE NOCASE`.
+    An enrollment under an existing name checks the pollution guard before adding
+    an exemplar. Also embeddingModelId,
     aggregationProfileId, timestamps, lastMatchedAt, lastEvaluatedAt,
     lastEvaluatedDistance. **No `centroid` column** — scoring is `min` over
     exemplars, so a derived column would only add cache-coherency bugs.
@@ -281,11 +349,15 @@ a separate opt-in, decided later.
   after re-diarization the same id can mean another person — vector
   `BLOB CHECK (length = 1024)`, speechSeconds, captureDomain, the two model ids,
   `transcriptionId … ON DELETE CASCADE` (unlike an exemplar, a candidate *is* about
-  that recording), and `expiresAt` **stored per row**, indexed, so raising the
-  retention constant later cannot revive a vector promised a shorter life.
-  Promotion and deletion are one transaction on the exemplar side:
-  `insertExemplar` applies the cap and inserts, then the candidate row is dropped, so
-  the vector is never stored twice. Writes happen only under
+  that recording), and `expiresAt` **stored per row**, indexed, so changing the
+  default retention does not extend existing stored rows. A new evaluation can
+  replace a same-key candidate with a newly calculated expiry.
+  Promotion persists the exemplar before deleting the candidate. The capped exemplar
+  insertion is transactional; candidate deletion is a separate operation. If that
+  deletion fails, a redundant candidate can remain until retry or expiry, but its
+  voice is already persisted as an exemplar. Rejected insertions, including a full
+  profile, preserve the candidate through its existing retention window. Creation
+  of a new profile and its first exemplar is atomic. Writes happen only under the availability gate and
   `rememberSpeakersEnabled`, which requires acknowledged consent (decision 9), and
   only above `minSpeechSecondsToEnroll` — a vector that can never be promoted would
   be biometric data held for an offer never made. Never read by the matcher.
@@ -294,8 +366,8 @@ a separate opt-in, decided later.
   GRDB already serializes through `dbQueue`. Matching itself lives in a stateless,
   I/O-free `SpeakerVoiceprintMatcher` so it can be tested on fixtures alone. Cosine
   math on vectors normalized once at entry (Amendment 1); O(profiles × clusters),
-  microseconds, no scheduler involvement.
-  **Adapter prerequisite:** today `DiarizationService.diarize()` drops FluidAudio's
+  no new inference scheduling. Runtime cost remains to be measured.
+  **Adapter prerequisite in the original baseline:** `DiarizationService.diarize()` dropped FluidAudio's
   `speakerDatabase`/segment embeddings when building `MacParakeetDiarizationResult`
   — Phase 1's first change is surfacing per-speaker embeddings through that
   adapter (behind the feature flag), otherwise the matcher has nothing to score.
@@ -305,7 +377,8 @@ a separate opt-in, decided later.
   `speaker_profile_links`, which no export path touches. This also supersedes the
   2026-06-14 plan's Phase 1 step 4 ("Export `profileId`, `assignmentSource`, and
   confirmation state in JSON surfaces"): identity metadata never appears in exports.
-- **Wiring**: the two insertion points above.
+- **Wiring**: meeting observations are evaluated after the completed transcription
+  is saved. File/URL identity remains Phase 2.
 - **Settings**: "Remember speakers" toggle (default off, requires speaker detection
   on) + profile list with per-profile delete + "Delete all voice profiles".
 - **Deletion semantics**: deleting a profile runs as **one transaction**. The
@@ -315,14 +388,16 @@ a separate opt-in, decided later.
   matching decision journal is purged for that profile in the same transaction.
   Tested by asserting that no row in either table references the deleted id, and that
   transcript labels survive. "Delete all voice profiles" is the same transaction over
-  every profile, not a loop that can half-fail.
+  every profile, not a loop that can half-fail; it also clears enrollment candidates
+  and all journal rows, including entries with no profile reference.
 - **Export boundary**: `speaker_profiles`, `speaker_profile_exemplars`,
   `speaker_profile_links`, `speaker_embedding_candidates` and the decision journal are
   excluded from **every** outward surface — JSON/TXT/MD/SRT/VTT/PDF/DOCX exports,
   `ExportCommand.projectedJSON()`, diagnostics, support bundles, and any future
   database export. This holds by construction (no export path reads these tables, and
-  nothing is added to `Transcription`), and PR 10 asserts it **per table on every
-  surface**, so a table added later cannot inherit the exemption silently.
+  nothing is added to `Transcription`). Existing boundaries need focused regression
+  tests during integration; PR 10 must complete the audit for every outward surface
+  before release. A table added later cannot inherit an exemption silently.
 - **Privacy invariants**: profile store lives in the user DB, covered by existing
   user-data deletion rules.
 
@@ -345,14 +420,15 @@ differentiator, but honestly:
 
 ## Phases
 
-- **Phase 0 — calibration spike (no product code, ~1–2 days).** Harness (hidden CLI
+- **Phase 0 — historical calibration spike (July, no product code).** Harness (hidden CLI
   subcommand or script) over Daniel's retained meeting corpus: run diarization,
   dump `speakerDatabase` embeddings per meeting, compute intra-/inter-speaker
   distance distributions across meetings + channels. Output: research report with
   separation evidence, chosen τ + margin, and a GO/NO-GO. Kills the feature
   cheaply if WeSpeaker can't separate on compressed system audio.
-- **Phase 1 — core loop (meetings), ten independently shippable PRs.** PRs 1–6 are
-  invisible to users, and the numbering matches the shipped PRs one-to-one:
+- **Phase 1 — core loop (meetings), ten reviewable increments.** PRs 1–6 are
+  foundations behind the disabled gate; the existing branches are cumulative,
+  so review their dependencies and integrated state before landing:
   1. Surface embeddings through the diarization adapter: `SpeakerEmbedding` (normalizing
      on entry), `SpeakerCaptureDomain`, `SpeakerModelIdentity`, per-cluster speech
      durations, key remapping through `idMapping` (`DiarizationService.swift:227-234` —
@@ -369,20 +445,20 @@ differentiator, but honestly:
      ([#1004](https://github.com/moona3k/macparakeet/pull/1004)). Split from 4, which
      the July plan had as one item: the service is testable on fixtures alone, while
      this touches the meeting path.
-  6. Short-lived enrollment candidates (decision 9): without them nothing can be
-     enrolled after the fact, because the vector is gone by the time the user types
-     a name ([#1005](https://github.com/moona3k/macparakeet/pull/1005)).
+  6. Short-lived enrollment candidates (experimental design 9): support enrollment
+     after the fact without retaining vectors indefinitely or repeating diarization
+     ([#1005](https://github.com/moona3k/macparakeet/pull/1005)).
   7. Consent sheet on the toggle + the enrollment prompt after a rename. The consent
      gate ships with, not after, the first surface that can turn writing on.
   8. Suggestion banner (confirm/dismiss).
   9. Voice-profile admin screen + a Reset & Cleanup row.
-  10. Leak tests (export JSON, CLI `projectedJSON()`, feedback bundle), specs, ADR,
-     privacy docs, telemetry allowlist.
+  10. Complete outward-surface leak tests (export JSON, CLI `projectedJSON()`, feedback
+     bundle), feature specs, promoted ADR, privacy docs and telemetry review before
+     release. The internal contract and focused boundary tests accompany foundations.
 - **Phase 2 — breadth.** File/URL-transcription path (the Reddit author's
-  185-episode podcast case), profile management UI, confirmation-driven
-  multi-sample updates, spec/02-features + contracts + new ADR (promote the
-  2026-06-14 plan's speaker-memory section), user-facing privacy docs, CLI
-  `speakers list|delete` parity.
+  185-episode podcast case) and CLI `speakers list|delete` parity, with matching
+  feature/contract updates. Meeting profile management, deletion, confirmation
+  semantics and privacy documentation belong to Phase 1 before release.
 - **Phase 3 — judged later, each its own decision.** Recurring-unknown detection
   (the issue's literal "appeared in 5 recordings" ask — still out of scope: it needs
   unenrolled vectors compared *against each other*, which decision 9's candidates
@@ -399,11 +475,13 @@ differentiator, but honestly:
 
 ## Decisions (2026-09-09)
 
-5. **Tau is not a user setting.** Compiled constant, hidden `UserDefaults` override for
-   dogfooding. A semantic three-step control is reconsidered only if calibration shows
-   the right tau varies by user.
-6. **Calibration by decision journal**, not by assembling a corpus or re-diarizing on
-   demand. This lifts the Phase 1 corpus gate.
+5. **Tau is not a user setting.** The implementation uses an injectable policy with
+   compiled `.v1` defaults. The proposed hidden `UserDefaults` override for
+   calibration is not implemented in this series. A semantic three-step control is
+   reconsidered only if calibration shows the right tau varies by user.
+6. **Calibration supported by a local decision journal.** The 2026-09-10 integration
+   decision permits foundations behind a disabled gate, but retains a separate
+   held-out real-meeting release evaluation. The journal does not replace it.
 7. **Vectors in the user database as `BLOB`.** Not the keychain: two stores to keep in
    sync makes deletion a two-phase operation that can half-fail — the worst possible bug
    on biometric data — and keychain items are excluded from some backups.
@@ -411,9 +489,11 @@ differentiator, but honestly:
    right to erasure, which means not shippable. It also carries the diagnostic read-out
    that turns "this profile never matches" from a mystery into a number.
 
-## Decisions (2026-09-10)
+## Experimental integration design (2026-09-10)
 
-9. **Short-lived enrollment candidates**, revising decision 2. The flywheel needs the
+9. **Short-lived enrollment candidates**, a design in PR #1005 assessed as part of
+   the experimental integration, revising decision 2. This is not a July decision
+   attributed to Daniel or approval to release candidate retention. The flywheel needs the
    user to name a speaker in a finished transcript, but by then the vector is gone: it
    lives in memory during transcription, feeds scoring, and is discarded. The three
    alternatives are worse. Re-diarizing on demand needs audio that retention settings or
@@ -428,9 +508,11 @@ differentiator, but honestly:
    `speaker_embedding_candidates` therefore holds a vector per detected speaker, bounded
    on every side: written only while `rememberSpeakers` is on, only above the enrollment
    gate, never compared against each other (so this is not recurring-unknown detection),
-   promoted to an exemplar and dropped on enrollment, deleted with their transcription,
+   promoted to an exemplar and dropped only when insertion succeeds, retained on
+   rejected promotion, deleted with their transcription,
    excluded from exports, stated in the consent sheet, and expiring after seven days on
-   a per-row `expiresAt` so raising the constant cannot resurrect them. Anarlog keeps 45
+   a per-row `expiresAt` that is unchanged by later default-retention changes
+   (a new evaluation may replace the row). Anarlog keeps 45
    days; naming is a same-week action and unnamed vectors earn nothing by waiting.
 
    **The consent gate moves with the first write.** It sat at the first enrollment,
@@ -445,4 +527,4 @@ differentiator, but honestly:
    With the preference off by default nothing is stored until the user asks for the
    feature. But BIPA and the GDPR do not distinguish a useful print from a dormant one,
    and this is the first privacy invariant the series loosens rather than tightens, so it
-   goes in the promoted ADR (Phase 2) explicitly rather than into a commit message.
+   must be explicit in the promoted ADR before official release.

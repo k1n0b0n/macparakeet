@@ -1687,7 +1687,7 @@ public actor TranscriptionService: SpeakerConfiguredRetranscriptionService, Audi
             )
         } catch {
             logger.error(
-                "meeting_voiceprint_failed error=\(error.localizedDescription, privacy: .public)"
+                "meeting_voiceprint_failed error=\(error.localizedDescription, privacy: .private)"
             )
         }
     }

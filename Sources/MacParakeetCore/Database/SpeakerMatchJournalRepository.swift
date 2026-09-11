@@ -3,8 +3,8 @@ import GRDB
 
 /// One matching decision, kept locally so thresholds can be calibrated on real
 /// meetings rather than the clean-corpus numbers the plan had to borrow. The
-/// label the user ends up typing is the ground truth, which makes these rows
-/// identifying: they never leave the machine, and they expire.
+/// label the user ends up typing is reviewable feedback, not independent ground
+/// truth. These identifying rows stay local and expire.
 public struct SpeakerMatchJournalEntry: Codable, Identifiable, Sendable, Equatable {
     public var id: UUID
     public var transcriptionId: UUID
@@ -62,8 +62,8 @@ public protocol SpeakerMatchJournalRepositoryProtocol: Sendable {
 }
 
 public final class SpeakerMatchJournalRepository: SpeakerMatchJournalRepositoryProtocol {
-    /// Long enough for the twenty-odd meetings calibration needs, short enough
-    /// that this never becomes an archive of who spoke to whom.
+    /// Bounds local diagnostic retention; it does not define an evaluation's
+    /// required sample size.
     public static let defaultRetention: TimeInterval = 90 * 24 * 60 * 60
 
     private let dbQueue: DatabaseQueue

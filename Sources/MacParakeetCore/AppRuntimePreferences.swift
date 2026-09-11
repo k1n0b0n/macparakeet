@@ -595,7 +595,11 @@ public final class UserDefaultsAppRuntimePreferences: AppRuntimePreferencesProto
     /// The consent gate is part of the resolver rather than a check at the
     /// enrollment surface: a voice is now kept from the end of the meeting, so
     /// a gate that only guarded naming would come too late.
-    public static func rememberSpeakersEnabled(defaults: UserDefaults = .standard) -> Bool {
+    public static func rememberSpeakersEnabled(
+        defaults: UserDefaults = .standard,
+        arguments: [String] = ProcessInfo.processInfo.arguments
+    ) -> Bool {
+        guard AppFeatures.isVoiceProfilesAvailable(arguments: arguments) else { return false }
         let enabled = defaults.object(forKey: rememberSpeakersKey) as? Bool
             ?? defaultRememberSpeakersEnabled
         return enabled

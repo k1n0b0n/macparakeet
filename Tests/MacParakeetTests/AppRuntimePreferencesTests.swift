@@ -603,7 +603,9 @@ final class AppRuntimePreferencesTests: XCTestCase {
                     forKey: UserDefaultsAppRuntimePreferences.voiceprintConsentAcknowledgedAtKey
                 )
             }
-            return UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(defaults: defaults)
+            return UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
+                defaults: defaults, arguments: [AppFeatures.voiceProfilesDeveloperLaunchArgument]
+            )
         }
 
         let consented = Date()

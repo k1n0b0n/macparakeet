@@ -26,6 +26,7 @@ final class AppEnvironment {
     let speakerEmbeddingCandidateRepo: SpeakerEmbeddingCandidateRepository
     let speakerMatchJournalRepo: SpeakerMatchJournalRepository
     let speakerVoiceprintService: SpeakerVoiceprintService
+    private let speakerVoiceprintRetention: SpeakerVoiceprintRetention
     let customWordRepo: CustomWordRepository
     let snippetRepo: TextSnippetRepository
     let chatConversationRepo: ChatConversationRepository
@@ -102,8 +103,10 @@ final class AppEnvironment {
             journal: speakerMatchJournalRepo,
             isEnabled: { UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled() }
         )
-        // Nothing else prunes for a user who stops recording and stops naming.
-        try? speakerEmbeddingCandidateRepo.pruneExpired()
+        speakerVoiceprintRetention = SpeakerVoiceprintRetention(
+            candidates: speakerEmbeddingCandidateRepo,
+            journal: speakerMatchJournalRepo
+        )
         customWordRepo = CustomWordRepository(dbQueue: databaseManager.dbQueue)
         snippetRepo = TextSnippetRepository(dbQueue: databaseManager.dbQueue)
         chatConversationRepo = ChatConversationRepository(dbQueue: databaseManager.dbQueue)
@@ -437,7 +440,7 @@ final class AppEnvironment {
             podcastAudioFetcher: PodcastAudioDownloader(),
             diarizationService: diarizationService,
             meetingArtifactStore: meetingArtifactStore,
-            speakerVoiceprints: speakerVoiceprintService
+            speakerVoiceprints: AppFeatures.isVoiceProfilesAvailable() ? speakerVoiceprintService : nil
         )
 
         meetingRecordingRecoveryService = MeetingRecordingRecoveryService(

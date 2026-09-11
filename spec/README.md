@@ -32,6 +32,10 @@ semi-public boundaries such as meeting artifact folders, recovery/retention
 safety, and CLI JSON output. Update the matching contract doc and focused tests
 when changing one of those surfaces.
 
+[Speaker Voiceprints](contracts/speaker-voiceprints.md) defines the experimental
+voice-profile gate, local storage lifecycle and export exclusion. Implementation
+behind that gate is separate from accuracy evaluation and official release.
+
 ## Design References
 
 - [UI Patterns](04-ui-patterns.md) is the active product UI contract.
@@ -76,6 +80,7 @@ Feature gates in the current source (`Sources/MacParakeetCore/AppFeatures.swift`
 | `meetingCaptureReliabilityEnabled` | `true` | Default-on kill switch for ADR-025 signal-based mic-health monitoring and telemetry; direct source lifecycle recovery is independent |
 | `meetingSourceHealthUIEnabled` | `false` | Routine source-health chips/pill glyph/tile mirror stay hidden; actionable recovering, stalled, interrupted, or unavailable warnings bypass this presentation flag |
 | `meetingActivityDetectionEnabled` | `false` | ADR-024 collectors/detector are compiled but runtime coordinator/UI remain gated |
+| `voiceProfilesEnabled` | `false` | Experimental meeting voice-profile foundations; DEBUG builds may opt in with `--enable-voice-profiles`, but the preference remains off and requires consent plus meeting speaker detection. Release builds ignore that argument. Consent/enrollment/suggestion/admin UI and held-out real-meeting release evaluation remain outstanding; see the [contract](contracts/speaker-voiceprints.md) and [release gates](../plans/active/2026-07-03-speaker-voiceprints.md#integration-and-release-gates-2026-09-10). |
 | `transformsEnabled` | `true` | Productized Transforms shipping surface |
 | `cohereEngineEnabled` | `true` | Settings exposes Cohere Transcribe as an opt-in, downloaded, batch-only local engine; no live preview/timestamps |
 | `meetingVadLiveChunkingEnabled` | `true` | VAD-guided meeting live-preview chunking; final post-stop transcript path unchanged |
