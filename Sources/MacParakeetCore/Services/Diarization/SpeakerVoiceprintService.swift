@@ -19,6 +19,49 @@ public enum SpeakerProfileEnrollment: Sendable, Equatable {
     case rejectedProfileFull(SpeakerProfile)
 }
 
+/// One enrolled voice, as the administration surface needs to show it.
+///
+/// Carries the diagnostic fields deliberately: "this profile never matches" is
+/// the feature's first failure mode, and the answer is a number the user can
+/// compare against the threshold, not a mystery.
+public struct EnrolledVoice: Sendable, Equatable, Identifiable {
+    public var id: UUID { profile.id }
+    public let profile: SpeakerProfile
+    public let sampleCount: Int
+    public let maxSamples: Int
+    /// Recordings this voice has been confirmed in.
+    public let recognizedCount: Int
+    /// `true` when the samples were produced by a model the current pipeline no
+    /// longer uses, so they can never score. Re-enrollment is the way out.
+    public let usesRetiredModel: Bool
+    /// Closest distance at the last scoring, and the threshold it had to beat.
+    public let lastEvaluatedDistance: Double?
+    public let acceptanceThreshold: Double
+
+    public init(
+        profile: SpeakerProfile,
+        sampleCount: Int,
+        maxSamples: Int,
+        recognizedCount: Int,
+        usesRetiredModel: Bool,
+        lastEvaluatedDistance: Double?,
+        acceptanceThreshold: Double
+    ) {
+        self.profile = profile
+        self.sampleCount = sampleCount
+        self.maxSamples = maxSamples
+        self.recognizedCount = recognizedCount
+        self.usesRetiredModel = usesRetiredModel
+        self.lastEvaluatedDistance = lastEvaluatedDistance
+        self.acceptanceThreshold = acceptanceThreshold
+    }
+
+    /// Scored but never accepted, with a number to show for it.
+    public var scoredButNeverMatched: Bool {
+        profile.lastMatchedAt == nil && lastEvaluatedDistance != nil
+    }
+}
+
 public protocol SpeakerVoiceprintServicing: Sendable {
     /// Names worth proposing, and the voices this run leaves available for
     /// enrollment. Applies nothing, and does no work when off.
@@ -65,6 +108,27 @@ public protocol SpeakerVoiceprintServicing: Sendable {
         fingerprint: TranscriptFingerprint
     ) async throws
 
+    /// Every enrolled voice with what the administration surface needs to
+    /// explain it, including why one may never be matching.
+    func enrolledVoices() async throws -> [EnrolledVoice]
+
+    /// The samples behind one profile, oldest first.
+    func samples(profileId: UUID) async throws -> [SpeakerProfileExemplar]
+
+    /// Renames a profile. Throws when the name is taken by another one.
+    func renameProfile(id: UUID, to displayName: String) async throws
+
+    /// Removes one sample. Refuses the last one, which would leave a profile
+    /// that is listed, named, and can never match.
+    @discardableResult
+    func deleteSample(id: UUID, profileId: UUID) async throws -> Bool
+
+    /// Forgets a voice. Labels already written to transcripts are untouched.
+    func forgetVoice(profileId: UUID) async throws
+
+    /// Forgets every voice, its samples, decisions and retained candidates.
+    func forgetAllVoices() async throws
+
     /// Not offered again for this version of the transcript.
     func dismiss(
         _ suggestion: SpeakerVoiceprintSuggestion,
@@ -91,6 +155,10 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
     private let journal: SpeakerMatchJournalRepositoryProtocol
     private let policy: SpeakerMatchPolicy
     private let candidateRetention: TimeInterval
+    /// The model the pipeline produces today. Samples from another one can
+    /// never score, so administration says so instead of showing a profile
+    /// that looks healthy.
+    private let embeddingModelId: String
     /// Read per call, so turning the preference off takes effect immediately.
     private let isEnabled: @Sendable () -> Bool
     private let now: @Sendable () -> Date
@@ -100,6 +168,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         candidates: SpeakerEmbeddingCandidateRepositoryProtocol,
         journal: SpeakerMatchJournalRepositoryProtocol,
         policy: SpeakerMatchPolicy = .v1,
+        embeddingModelId: String = DiarizationService.embeddingModelId,
         candidateRetention: TimeInterval = SpeakerEmbeddingCandidateRepository.defaultRetention,
         isEnabled: @escaping @Sendable () -> Bool,
         now: @escaping @Sendable () -> Date = { Date() }
@@ -108,6 +177,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         self.candidates = candidates
         self.journal = journal
         self.policy = policy
+        self.embeddingModelId = embeddingModelId
         self.candidateRetention = candidateRetention
         self.isEnabled = isEnabled
         self.now = now
@@ -456,6 +526,70 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 updatedAt: now()
             )
         )
+    }
+
+    // MARK: Administration
+
+    /// None of these check `isEnabled`. Turning the feature off must never trap
+    /// a user's stored voices behind it — reading and deleting what is already
+    /// there is exactly what they need once they change their mind.
+
+    public func enrolledVoices() async throws -> [EnrolledVoice] {
+        let stored = try profiles.profiles()
+        guard !stored.isEmpty else { return [] }
+        let samples = try profiles.exemplarsByProfile()
+        let currentModel = embeddingModelId
+
+        return stored.map { profile in
+            EnrolledVoice(
+                profile: profile,
+                sampleCount: samples[profile.id]?.count ?? 0,
+                maxSamples: policy.maxReferencesPerProfile,
+                recognizedCount: (try? profiles.confirmedLinkCount(profileId: profile.id)) ?? 0,
+                usesRetiredModel: profile.embeddingModelId != currentModel,
+                lastEvaluatedDistance: profile.lastEvaluatedDistance,
+                acceptanceThreshold: policy.tau
+            )
+        }
+    }
+
+    public func samples(profileId: UUID) async throws -> [SpeakerProfileExemplar] {
+        try profiles.exemplars(profileId: profileId)
+    }
+
+    public func renameProfile(id: UUID, to displayName: String) async throws {
+        guard var profile = try profiles.profile(id: id) else { return }
+        let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let owner = try profiles.profile(named: name), owner.id != id {
+            throw SpeakerProfileStoreError.nameAlreadyTaken(
+                normalizedName: SpeakerProfile.normalizedName(for: name)
+            )
+        }
+        profile.displayName = name
+        profile.updatedAt = now()
+        try profiles.save(profile)
+    }
+
+    /// Refuses the last sample: a profile with none is listed and named but can
+    /// never match, which reads as a bug rather than as a choice. Forgetting
+    /// the voice is the way to remove the last one.
+    @discardableResult
+    public func deleteSample(id: UUID, profileId: UUID) async throws -> Bool {
+        guard try profiles.exemplars(profileId: profileId).count > 1 else { return false }
+        return try profiles.deleteExemplar(id: id)
+    }
+
+    public func forgetVoice(profileId: UUID) async throws {
+        _ = try profiles.deleteProfile(id: profileId)
+    }
+
+    /// Candidates go too. They are not owned by any profile, so no cascade
+    /// reaches them, and leaving retained voices behind after "forget every
+    /// voice" would be the one deletion a user cannot see or explain.
+    public func forgetAllVoices() async throws {
+        try profiles.deleteAllProfiles()
+        try candidates.deleteAll()
+        try journal.deleteAll()
     }
 
     // MARK: Internals

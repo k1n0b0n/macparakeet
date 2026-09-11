@@ -152,6 +152,14 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         }
     }
 
+    // Administration is exercised in its own suite; these are unused here.
+    func enrolledVoices() async throws -> [EnrolledVoice] { [] }
+    func samples(profileId _: UUID) async throws -> [SpeakerProfileExemplar] { [] }
+    func renameProfile(id _: UUID, to _: String) async throws {}
+    func deleteSample(id _: UUID, profileId _: UUID) async throws -> Bool { false }
+    func forgetVoice(profileId _: UUID) async throws {}
+    func forgetAllVoices() async throws {}
+
     func dismiss(
         _ suggestion: SpeakerVoiceprintSuggestion,
         transcriptionId _: UUID,
