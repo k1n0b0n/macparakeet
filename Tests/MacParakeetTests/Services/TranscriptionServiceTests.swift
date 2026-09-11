@@ -80,6 +80,75 @@ private final class DiarizationConstraintRecorder: @unchecked Sendable {
     }
 }
 
+private actor MeetingVoiceprintSpy: SpeakerVoiceprintServicing {
+    struct Evaluation: Sendable {
+        let transcriptionId: UUID
+        let fingerprint: TranscriptFingerprint
+        let clusters: [SpeakerClusterObservation]
+        let persistedTranscription: Transcription?
+    }
+
+    enum Failure: Error {
+        case evaluationFailed
+        case unexpectedOperation
+    }
+
+    private let transcriptions: TranscriptionRepository
+    private let throwOnEvaluate: Bool
+    private(set) var evaluations: [Evaluation] = []
+
+    init(transcriptions: TranscriptionRepository, throwOnEvaluate: Bool) {
+        self.transcriptions = transcriptions
+        self.throwOnEvaluate = throwOnEvaluate
+    }
+
+    func evaluate(
+        transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint,
+        clusters: [SpeakerClusterObservation]
+    ) async throws -> [SpeakerVoiceprintSuggestion] {
+        evaluations.append(Evaluation(
+            transcriptionId: transcriptionId,
+            fingerprint: fingerprint,
+            clusters: clusters,
+            persistedTranscription: try transcriptions.fetch(id: transcriptionId)
+        ))
+        if throwOnEvaluate { throw Failure.evaluationFailed }
+        return []
+    }
+
+    func enrollmentCandidate(
+        transcriptionId: UUID, speakerId: String, fingerprint: TranscriptFingerprint
+    ) async throws -> SpeakerClusterObservation? {
+        throw Failure.unexpectedOperation
+    }
+
+    func pruneExpiredCandidates() async throws {
+        throw Failure.unexpectedOperation
+    }
+
+    func enroll(
+        displayName: String, observation: SpeakerClusterObservation, transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint, allowMergeIntoExistingName: Bool
+    ) async throws -> SpeakerProfileEnrollment {
+        throw Failure.unexpectedOperation
+    }
+
+    func confirm(
+        _ suggestion: SpeakerVoiceprintSuggestion, observation: SpeakerClusterObservation,
+        transcriptionId: UUID, fingerprint: TranscriptFingerprint
+    ) async throws {
+        throw Failure.unexpectedOperation
+    }
+
+    func dismiss(
+        _ suggestion: SpeakerVoiceprintSuggestion, transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint
+    ) async throws {
+        throw Failure.unexpectedOperation
+    }
+}
+
 private final class TelemetrySpy: TelemetryServiceProtocol, @unchecked Sendable {
     private let lock = NSLock()
     private var events: [TelemetryEventSpec] = []
@@ -1820,6 +1889,55 @@ final class TranscriptionServiceTests: XCTestCase {
         XCTAssertEqual(fetched.status, .completed)
         XCTAssertEqual(fetched.rawTranscript, "Queued meeting finished")
         XCTAssertEqual(fetched.id, stub.id)
+    }
+
+    func testFinalizeMeetingScoresPersistedSystemSpeakersAfterCompletion() async throws {
+        let recording = try makeDualSourceMeetingRecording(displayName: "Voiceprint ordering")
+        defer { try? FileManager.default.removeItem(at: recording.folderURL) }
+        let (service, spy, embedding) = try await makeVoiceprintMeetingService()
+        let stub = try await service.prepareMeetingTranscription(recording: recording)
+
+        let completed = try await service.finalizeMeetingTranscription(
+            recording: recording, updating: stub.id, onProgress: nil
+        )
+
+        let evaluations = await spy.evaluations
+        XCTAssertEqual(evaluations.count, 1)
+        let evaluation = try XCTUnwrap(evaluations.first)
+        let persistedAtEvaluation = try XCTUnwrap(evaluation.persistedTranscription)
+        XCTAssertEqual(evaluation.transcriptionId, stub.id)
+        XCTAssertEqual(completed.id, stub.id)
+        XCTAssertEqual(completed.status, .completed)
+        XCTAssertEqual(persistedAtEvaluation.status, .completed)
+        XCTAssertEqual(persistedAtEvaluation.rawTranscript, completed.rawTranscript)
+        XCTAssertEqual(
+            evaluation.fingerprint,
+            SpeakerAttributionResolver.fingerprint(for: persistedAtEvaluation)
+        )
+        XCTAssertEqual(evaluation.fingerprint, SpeakerAttributionResolver.fingerprint(for: completed))
+        XCTAssertNotEqual(evaluation.fingerprint, SpeakerAttributionResolver.fingerprint(for: stub))
+        XCTAssertEqual(persistedAtEvaluation.speakers?.map(\.id), ["microphone", "system:S1"])
+        XCTAssertEqual(evaluation.clusters, [SpeakerClusterObservation(
+            speakerId: "system:S1", embedding: embedding, speechSeconds: 0.2, captureDomain: .system
+        )])
+        XCTAssertEqual(try transcriptionRepo.count(), 1)
+    }
+
+    func testVoiceprintEvaluationFailureDoesNotFailMeetingCompletion() async throws {
+        let recording = try makeDualSourceMeetingRecording(displayName: "Voiceprint failure")
+        defer { try? FileManager.default.removeItem(at: recording.folderURL) }
+        let (service, spy, _) = try await makeVoiceprintMeetingService(throwOnEvaluate: true)
+
+        let completed = try await service.transcribeMeeting(recording: recording)
+
+        let evaluations = await spy.evaluations
+        XCTAssertEqual(evaluations.count, 1)
+        XCTAssertEqual(evaluations.first?.persistedTranscription?.status, .completed)
+        XCTAssertEqual(completed.status, .completed)
+        let persisted = try XCTUnwrap(transcriptionRepo.fetch(id: completed.id))
+        XCTAssertEqual(persisted.status, .completed)
+        XCTAssertEqual(persisted.rawTranscript, completed.rawTranscript)
+        XCTAssertEqual(try transcriptionRepo.count(), 1)
     }
 
     func testPartialMeetingKeepsCompletedStatusAndPersistsPlayableDuration() async throws {
@@ -3764,6 +3882,42 @@ final class TranscriptionServiceTests: XCTestCase {
                 TimestampedWord(word: "remote", startMs: 0, endMs: 200, confidence: 0.9),
             ]),
         ]
+    }
+
+    private func makeVoiceprintMeetingService(
+        throwOnEvaluate: Bool = false
+    ) async throws -> (TranscriptionService, MeetingVoiceprintSpy, SpeakerEmbedding) {
+        await mockSTT.configureSequence(results: meetingSourceSTTResults())
+        let embedding = try XCTUnwrap(SpeakerEmbedding(
+            rawVector: [1] + [Float](repeating: 0, count: SpeakerEmbedding.dimension - 1),
+            identity: SpeakerModelIdentity(
+                embeddingModelId: "test-meeting-voice", aggregationProfileId: "test-meeting-config"
+            )
+        ))
+        let diarization = MockDiarizationService()
+        await diarization.configure(result: MacParakeetDiarizationResult(
+            segments: [
+                SpeakerSegment(speakerId: "S1", startMs: 0, endMs: 200),
+                // This cluster wins no words and must not reach voice matching.
+                SpeakerSegment(speakerId: "S2", startMs: 1000, endMs: 1200),
+            ],
+            speakerCount: 2,
+            speakers: [SpeakerInfo(id: "S1", label: "Speaker 1"), SpeakerInfo(id: "S2", label: "Speaker 2")],
+            speakerEmbeddings: ["S1": embedding, "S2": embedding],
+            speechMsBySpeaker: ["S1": 200, "S2": 200]
+        ))
+        let spy = MeetingVoiceprintSpy(transcriptions: transcriptionRepo, throwOnEvaluate: throwOnEvaluate)
+        let service = TranscriptionService(
+            audioProcessor: mockAudio,
+            sttTranscriber: mockSTT,
+            transcriptionRepo: transcriptionRepo,
+            shouldDiarizeMeetings: { true },
+            diarizationService: diarization,
+            meetingArtifactStore: nil,
+            meetingAutomationHookRunner: nil,
+            speakerVoiceprints: spy
+        )
+        return (service, spy, embedding)
     }
 
     private func makeTranscriptionService(cleanedMicTimeoutSeconds: TimeInterval) -> TranscriptionService {

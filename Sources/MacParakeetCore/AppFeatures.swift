@@ -4,6 +4,23 @@ import Foundation
 /// without touching every call site. Release builds should set these to the
 /// shipping configuration before tagging a version.
 public enum AppFeatures {
+    /// Experimental speaker recognition. Release availability requires a
+    /// deliberate flag change after held-out meeting evaluation passes.
+    public static let voiceProfilesEnabled: Bool = false
+    public static let voiceProfilesDeveloperLaunchArgument = "--enable-voice-profiles"
+
+    /// A saved preference or a development launch argument cannot unlock an
+    /// unreleased feature in a release build. Consent remains a separate gate.
+    public static func isVoiceProfilesAvailable(
+        arguments: [String] = ProcessInfo.processInfo.arguments
+    ) -> Bool {
+        #if DEBUG
+        voiceProfilesEnabled || arguments.contains(voiceProfilesDeveloperLaunchArgument)
+        #else
+        voiceProfilesEnabled
+        #endif
+    }
+
     /// Meeting Recording (ADR-014). When `false`, all meeting recording entry
     /// points are hidden: Transcribe tile, menu-bar "Start Recording", global
     /// meeting hotkey, settings card, library filter, and the screen recording

@@ -515,6 +515,13 @@ public final class UserDefaultsAppRuntimePreferences: AppRuntimePreferencesProto
     public static let defaultSpeakerDiarizationEnabled = true
     public static let meetingSpeakerDiarizationKey = "meetingSpeakerDiarization"
     public static let defaultMeetingSpeakerDiarizationEnabled = true
+    /// Off unless the user asks: a voiceprint is biometric data.
+    public static let rememberSpeakersKey = "rememberSpeakers"
+    public static let defaultRememberSpeakersEnabled = false
+    /// A date rather than a flag: "when did you consent?" needs one. Asked when
+    /// the toggle goes on, not at the first enrollment — by then a voice has
+    /// already been stored.
+    public static let voiceprintConsentAcknowledgedAtKey = "voiceprintConsentAcknowledgedAt"
     public static let aiFormatterEnabledKey = "aiFormatterEnabled"
     public static let aiFormatterEnabledForDictationKey = "aiFormatterEnabledForDictation"
     public static let aiFormatterEnabledForTranscriptionsKey = "aiFormatterEnabledForTranscriptions"
@@ -579,6 +586,29 @@ public final class UserDefaultsAppRuntimePreferences: AppRuntimePreferencesProto
 
     public static func meetingSpeakerDiarizationEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: meetingSpeakerDiarizationKey) as? Bool ?? defaultMeetingSpeakerDiarizationEnabled
+    }
+
+    /// Requires speaker detection, since without clusters there is nothing to
+    /// match, and an acknowledged consent date, since the first thing this
+    /// feature does is store a voice.
+    ///
+    /// The consent gate is part of the resolver rather than a check at the
+    /// enrollment surface: a voice is now kept from the end of the meeting, so
+    /// a gate that only guarded naming would come too late.
+    public static func rememberSpeakersEnabled(
+        defaults: UserDefaults = .standard,
+        arguments: [String] = ProcessInfo.processInfo.arguments
+    ) -> Bool {
+        guard AppFeatures.isVoiceProfilesAvailable(arguments: arguments) else { return false }
+        let enabled = defaults.object(forKey: rememberSpeakersKey) as? Bool
+            ?? defaultRememberSpeakersEnabled
+        return enabled
+            && meetingSpeakerDiarizationEnabled(defaults: defaults)
+            && voiceprintConsentAcknowledgedAt(defaults: defaults) != nil
+    }
+
+    public static func voiceprintConsentAcknowledgedAt(defaults: UserDefaults = .standard) -> Date? {
+        defaults.object(forKey: voiceprintConsentAcknowledgedAtKey) as? Date
     }
 
     public static func showMeetingRecordingPill(defaults: UserDefaults = .standard) -> Bool {

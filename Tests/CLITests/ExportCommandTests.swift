@@ -1,4 +1,5 @@
 import ArgumentParser
+import GRDB
 import XCTest
 @testable import CLI
 @testable import MacParakeetCore
@@ -186,6 +187,73 @@ final class ExportCommandTests: XCTestCase {
         XCTAssertEqual(object["ok"] as? Bool, false)
         XCTAssertEqual(object["errorType"] as? String, "lookup")
         XCTAssertTrue((object["error"] as? String)?.contains("No transcription matching") == true)
+    }
+
+    func testJSONStdoutDoesNotExportPopulatedVoiceprintTables() async throws {
+        let dbURL = temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: dbURL) }
+        let manager = try DatabaseManager(path: dbURL.path)
+        let repository = TranscriptionRepository(dbQueue: manager.dbQueue)
+        let speaker = SpeakerInfo(id: "system:S1", label: "Others 1")
+        let enrollment = Transcription(
+            fileName: "enrollment.wav", speakerCount: 1, speakers: [speaker],
+            status: .completed, sourceType: .meeting
+        )
+        let meeting = Transcription(
+            fileName: "export.wav", rawTranscript: "Visible meeting transcript.",
+            speakerCount: 1, speakers: [speaker], status: .completed, sourceType: .meeting
+        )
+        try repository.save(enrollment)
+        try repository.save(meeting)
+        let command = try ExportCommand.parse([
+            meeting.id.uuidString, "--format", "json", "--stdout", "--database", dbURL.path,
+        ])
+        let before = try await captureStandardOutput { try await command.run() }
+
+        let voiceprints = SpeakerVoiceprintService(
+            profiles: SpeakerProfileRepository(dbQueue: manager.dbQueue),
+            candidates: SpeakerEmbeddingCandidateRepository(dbQueue: manager.dbQueue),
+            journal: SpeakerMatchJournalRepository(dbQueue: manager.dbQueue),
+            isEnabled: { true }
+        )
+        let embedding = try XCTUnwrap(SpeakerEmbedding(
+            rawVector: [1] + [Float](repeating: 0, count: SpeakerEmbedding.dimension - 1),
+            identity: SpeakerModelIdentity(
+                embeddingModelId: "private-cli-voice-model", aggregationProfileId: "private-cli-voice-config"
+            )
+        ))
+        let observation = SpeakerClusterObservation(
+            speakerId: speaker.id, embedding: embedding, speechSeconds: 30, captureDomain: .system
+        )
+        _ = try await voiceprints.enroll(
+            displayName: "PrivateCLIProfileName", observation: observation,
+            transcriptionId: enrollment.id,
+            fingerprint: SpeakerAttributionResolver.fingerprint(for: enrollment),
+            allowMergeIntoExistingName: false
+        )
+        let suggestions = try await voiceprints.evaluate(
+            transcriptionId: meeting.id,
+            fingerprint: SpeakerAttributionResolver.fingerprint(for: meeting), clusters: [observation]
+        )
+        let suggestion = try XCTUnwrap(suggestions.first)
+        try await manager.dbQueue.read { db in
+            for table in [
+                "speaker_profiles", "speaker_profile_exemplars", "speaker_profile_links",
+                "speaker_match_journal", "speaker_embedding_candidates",
+            ] {
+                XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(table)"), 1, table)
+            }
+        }
+
+        let after = try await captureStandardOutput { try await command.run() }
+        XCTAssertEqual(after, before, "Voiceprint storage must not change the CLI's public JSON projection")
+        XCTAssertTrue(after.contains("Visible meeting transcript."))
+        for secret in [
+            "PrivateCLIProfileName", "private-cli-voice-model", "private-cli-voice-config",
+            suggestion.profileId.uuidString, embedding.data.base64EncodedString(),
+        ] {
+            XCTAssertFalse(after.contains(secret), secret)
+        }
     }
 
     @MainActor func testExportToTxtWritesFile() throws {

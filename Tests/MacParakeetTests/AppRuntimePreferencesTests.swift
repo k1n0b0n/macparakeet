@@ -577,4 +577,44 @@ final class AppRuntimePreferencesTests: XCTestCase {
         XCTAssertFalse(transcriptionGate(global: false, transcripts: nil))
         XCTAssertFalse(transcriptionGate(global: false, transcripts: true))
     }
+
+    /// Three conditions, and consent is one of them: the feature stores a voice
+    /// at the end of every meeting, so a gate that only guarded naming would
+    /// come after the data was already on disk.
+    func testRememberSpeakersNeedsTheToggleDetectionAndConsent() {
+        func gate(toggle: Bool?, detection: Bool?, consentedAt: Date?) -> Bool {
+            let suite = "voiceprint-consent-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            addTeardownBlock {
+                UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
+            }
+            if let toggle {
+                defaults.set(toggle, forKey: UserDefaultsAppRuntimePreferences.rememberSpeakersKey)
+            }
+            if let detection {
+                defaults.set(
+                    detection,
+                    forKey: UserDefaultsAppRuntimePreferences.meetingSpeakerDiarizationKey
+                )
+            }
+            if let consentedAt {
+                defaults.set(
+                    consentedAt,
+                    forKey: UserDefaultsAppRuntimePreferences.voiceprintConsentAcknowledgedAtKey
+                )
+            }
+            return UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
+                defaults: defaults, arguments: [AppFeatures.voiceProfilesDeveloperLaunchArgument]
+            )
+        }
+
+        let consented = Date()
+        XCTAssertTrue(gate(toggle: true, detection: true, consentedAt: consented))
+        // The toggle alone is not consent.
+        XCTAssertFalse(gate(toggle: true, detection: true, consentedAt: nil))
+        XCTAssertFalse(gate(toggle: true, detection: false, consentedAt: consented))
+        XCTAssertFalse(gate(toggle: false, detection: true, consentedAt: consented))
+        // Off until asked, whatever else is set.
+        XCTAssertFalse(gate(toggle: nil, detection: true, consentedAt: consented))
+    }
 }

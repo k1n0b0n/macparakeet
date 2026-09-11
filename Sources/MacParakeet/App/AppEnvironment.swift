@@ -22,6 +22,11 @@ final class AppEnvironment {
     let knowledgeLayerMutator: KnowledgeLayerMutationService
     let speakerAttributionReader: SpeakerAttributionReadService
     let speakerCorrectionService: SpeakerCorrectionService
+    let speakerProfileRepo: SpeakerProfileRepository
+    let speakerEmbeddingCandidateRepo: SpeakerEmbeddingCandidateRepository
+    let speakerMatchJournalRepo: SpeakerMatchJournalRepository
+    let speakerVoiceprintService: SpeakerVoiceprintService
+    private let speakerVoiceprintRetention: SpeakerVoiceprintRetention
     let customWordRepo: CustomWordRepository
     let snippetRepo: TextSnippetRepository
     let chatConversationRepo: ChatConversationRepository
@@ -87,6 +92,21 @@ final class AppEnvironment {
         knowledgeLayerMutator = KnowledgeLayerMutationService(dbQueue: databaseManager.dbQueue)
         speakerAttributionReader = SpeakerAttributionReadService(dbQueue: databaseManager.dbQueue)
         speakerCorrectionService = SpeakerCorrectionService(dbQueue: databaseManager.dbQueue)
+        speakerProfileRepo = SpeakerProfileRepository(dbQueue: databaseManager.dbQueue)
+        speakerEmbeddingCandidateRepo = SpeakerEmbeddingCandidateRepository(
+            dbQueue: databaseManager.dbQueue
+        )
+        speakerMatchJournalRepo = SpeakerMatchJournalRepository(dbQueue: databaseManager.dbQueue)
+        speakerVoiceprintService = SpeakerVoiceprintService(
+            profiles: speakerProfileRepo,
+            candidates: speakerEmbeddingCandidateRepo,
+            journal: speakerMatchJournalRepo,
+            isEnabled: { UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled() }
+        )
+        speakerVoiceprintRetention = SpeakerVoiceprintRetention(
+            candidates: speakerEmbeddingCandidateRepo,
+            journal: speakerMatchJournalRepo
+        )
         customWordRepo = CustomWordRepository(dbQueue: databaseManager.dbQueue)
         snippetRepo = TextSnippetRepository(dbQueue: databaseManager.dbQueue)
         chatConversationRepo = ChatConversationRepository(dbQueue: databaseManager.dbQueue)
@@ -419,7 +439,8 @@ final class AppEnvironment {
             podcastSearchResolver: PodcastQueryResolver(),
             podcastAudioFetcher: PodcastAudioDownloader(),
             diarizationService: diarizationService,
-            meetingArtifactStore: meetingArtifactStore
+            meetingArtifactStore: meetingArtifactStore,
+            speakerVoiceprints: AppFeatures.isVoiceProfilesAvailable() ? speakerVoiceprintService : nil
         )
 
         meetingRecordingRecoveryService = MeetingRecordingRecoveryService(

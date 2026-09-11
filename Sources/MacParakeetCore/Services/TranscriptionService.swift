@@ -330,6 +330,7 @@ public actor TranscriptionService: SpeakerConfiguredRetranscriptionService, Audi
     private let meetingAutomationHookRunner: MeetingAutomationHookRunning?
     private let meetingCleanedMicrophoneReadinessPolicy: MeetingCleanedMicrophoneReadinessPolicy
     private let meetingFinalizationBenchmarkObserver: MeetingFinalizationBenchmarkObserver?
+    private let speakerVoiceprints: SpeakerVoiceprintServicing?
 
     public init(
         audioProcessor: AudioProcessorProtocol,
@@ -362,7 +363,8 @@ public actor TranscriptionService: SpeakerConfiguredRetranscriptionService, Audi
         playbackConverter: YouTubeAudioPlaybackConverting = YouTubeAudioPlaybackConverter(),
         meetingArtifactStore: MeetingArtifactStoring? = MeetingArtifactStore(),
         meetingAutomationHookRunner: MeetingAutomationHookRunning? = MeetingAutomationHookRunner(),
-        meetingCleanedMicrophoneReadinessPolicy: MeetingCleanedMicrophoneReadinessPolicy = .production
+        meetingCleanedMicrophoneReadinessPolicy: MeetingCleanedMicrophoneReadinessPolicy = .production,
+        speakerVoiceprints: SpeakerVoiceprintServicing? = nil
     ) {
         self.init(
             audioProcessor: audioProcessor,
@@ -396,7 +398,8 @@ public actor TranscriptionService: SpeakerConfiguredRetranscriptionService, Audi
             meetingArtifactStore: meetingArtifactStore,
             meetingAutomationHookRunner: meetingAutomationHookRunner,
             meetingCleanedMicrophoneReadinessPolicy: meetingCleanedMicrophoneReadinessPolicy,
-            meetingFinalizationBenchmarkObserver: nil
+            meetingFinalizationBenchmarkObserver: nil,
+            speakerVoiceprints: speakerVoiceprints
         )
     }
 
@@ -432,7 +435,8 @@ public actor TranscriptionService: SpeakerConfiguredRetranscriptionService, Audi
         meetingArtifactStore: MeetingArtifactStoring? = MeetingArtifactStore(),
         meetingAutomationHookRunner: MeetingAutomationHookRunning? = MeetingAutomationHookRunner(),
         meetingCleanedMicrophoneReadinessPolicy: MeetingCleanedMicrophoneReadinessPolicy = .production,
-        meetingFinalizationBenchmarkObserver: MeetingFinalizationBenchmarkObserver?
+        meetingFinalizationBenchmarkObserver: MeetingFinalizationBenchmarkObserver?,
+        speakerVoiceprints: SpeakerVoiceprintServicing? = nil
     ) {
         self.audioProcessor = audioProcessor
         self.sttTranscriber = sttTranscriber
@@ -468,6 +472,7 @@ public actor TranscriptionService: SpeakerConfiguredRetranscriptionService, Audi
         self.meetingAutomationHookRunner = meetingAutomationHookRunner
         self.meetingCleanedMicrophoneReadinessPolicy = meetingCleanedMicrophoneReadinessPolicy
         self.meetingFinalizationBenchmarkObserver = meetingFinalizationBenchmarkObserver
+        self.speakerVoiceprints = speakerVoiceprints
     }
 
     public func transcribe(
@@ -1517,6 +1522,8 @@ public actor TranscriptionService: SpeakerConfiguredRetranscriptionService, Audi
                 diarizationApplied: systemDiarization != nil
             )
 
+            await scoreVoiceprintsIfEnabled(for: completed, systemDiarization: systemDiarization)
+
             return completed
         } catch {
             let audioDurationSeconds = transcription.durationMs.map { Double($0) / 1000.0 } ?? recording.durationSeconds
@@ -1646,6 +1653,70 @@ public actor TranscriptionService: SpeakerConfiguredRetranscriptionService, Audi
         return outputs
     }
 
+    /// Scores this meeting's system-track speakers against enrolled voices.
+    ///
+    /// Runs after the transcript is persisted: the fingerprint is derived from
+    /// the saved words and segments, and the suggestion rows carry a foreign key
+    /// to the transcription. The service itself is the gate — with the
+    /// preference off it reads nothing and writes nothing.
+    ///
+    /// Failures are logged and swallowed on purpose. A suggestion that did not
+    /// appear costs the user a rename they were going to do anyway; a meeting
+    /// that fails to finish costs them the recording.
+    private func scoreVoiceprintsIfEnabled(
+        for transcription: Transcription,
+        systemDiarization: MeetingTranscriptFinalizer.SystemDiarization?
+    ) async {
+        guard let speakerVoiceprints, let systemDiarization else { return }
+        guard !systemDiarization.speakerEmbeddings.isEmpty else { return }
+
+        let observations = Self.voiceprintObservations(
+            systemDiarization: systemDiarization,
+            persistedSpeakers: transcription.speakers ?? []
+        )
+        guard !observations.isEmpty else { return }
+
+        do {
+            let suggestions = try await speakerVoiceprints.evaluate(
+                transcriptionId: transcription.id,
+                fingerprint: SpeakerAttributionResolver.fingerprint(for: transcription),
+                clusters: observations
+            )
+            logger.info(
+                "meeting_voiceprint_evaluated speakers=\(observations.count, privacy: .public) suggestions=\(suggestions.count, privacy: .public)"
+            )
+        } catch {
+            logger.error(
+                "meeting_voiceprint_failed error=\(error.localizedDescription, privacy: .private)"
+            )
+        }
+    }
+
+    /// Observations for the speakers the saved transcript actually contains.
+    ///
+    /// Scoped to the persisted speakers, not the diarizer's full output: the
+    /// finalizer drops any cluster whose segments won no words, so scoring the
+    /// raw list would write a suggestion keyed to a speaker the transcript does
+    /// not have — one the UI could never resolve.
+    ///
+    /// Durations arrive in milliseconds and the matching gates are in seconds.
+    static func voiceprintObservations(
+        systemDiarization: MeetingTranscriptFinalizer.SystemDiarization,
+        persistedSpeakers: [SpeakerInfo]
+    ) -> [SpeakerClusterObservation] {
+        let persistedIDs = Set(persistedSpeakers.map(\.id))
+        return systemDiarization.speakers.compactMap { speaker in
+            guard persistedIDs.contains(speaker.id) else { return nil }
+            guard let embedding = systemDiarization.speakerEmbeddings[speaker.id] else { return nil }
+            return SpeakerClusterObservation(
+                speakerId: speaker.id,
+                embedding: embedding,
+                speechSeconds: Double(systemDiarization.speechMsBySpeaker[speaker.id] ?? 0) / 1000,
+                captureDomain: .system
+            )
+        }
+    }
+
     private func diarizeMeetingSystemIfNeeded(
         recording: MeetingRecordingOutput,
         sourceWavURLs: [AudioSource: URL],
@@ -1709,9 +1780,25 @@ public actor TranscriptionService: SpeakerConfiguredRetranscriptionService, Audi
                 )
             }
 
+            // Embeddings and durations follow the same remap as the segments:
+            // the diarizer's "S1" becomes "system:S1", and carrying the raw
+            // keys over would attach one speaker's voice to another's label.
+            let mappedEmbeddings = Dictionary(
+                uniqueKeysWithValues: diarResult.speakerEmbeddings.compactMap { id, embedding in
+                    speakerIDMap[id].map { ($0, embedding) }
+                }
+            )
+            let mappedSpeechMs = Dictionary(
+                uniqueKeysWithValues: diarResult.speechMsBySpeaker.compactMap { id, ms in
+                    speakerIDMap[id].map { ($0, ms) }
+                }
+            )
+
             return MeetingTranscriptFinalizer.SystemDiarization(
                 speakers: mappedSpeakers,
-                segments: mappedSegments
+                segments: mappedSegments,
+                speakerEmbeddings: mappedEmbeddings,
+                speechMsBySpeaker: mappedSpeechMs
             )
         } catch is CancellationError {
             throw CancellationError()
