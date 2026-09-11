@@ -83,6 +83,7 @@ private extension SettingsCaptureWorkflow {
 struct SettingsView: View {
     @Bindable var viewModel: SettingsViewModel
     @Bindable var llmSettingsViewModel: LLMSettingsViewModel
+    @Bindable var voiceProfilesViewModel: VoiceProfilesViewModel
     let updater: SPUUpdater
     let transformHotkeys: [Prompt]
     let requestedTab: SettingsTab?
@@ -112,11 +113,15 @@ struct SettingsView: View {
     @State private var pendingModelDeletion: PendingModelDeletion?
     @State private var pendingMeetingAudioRetention: PendingMeetingAudioRetention?
     @State private var coherePolicyRelaunchInFlight = false
+    @State private var showVoiceProfiles = false
+    /// Owned by this view rather than the app: the sheet is the only consumer,
+    /// and it reloads from the store each time it opens.
     @State private var advancedTranscriptionExpanded = false
 
     init(
         viewModel: SettingsViewModel,
         llmSettingsViewModel: LLMSettingsViewModel,
+        voiceProfilesViewModel: VoiceProfilesViewModel,
         updater: SPUUpdater,
         transformHotkeys: [Prompt] = [],
         requestedTab: SettingsTab? = nil,
@@ -127,6 +132,7 @@ struct SettingsView: View {
     ) {
         self.viewModel = viewModel
         self.llmSettingsViewModel = llmSettingsViewModel
+        self.voiceProfilesViewModel = voiceProfilesViewModel
         self.updater = updater
         self.transformHotkeys = transformHotkeys
         self.requestedTab = requestedTab
@@ -1408,9 +1414,25 @@ struct SettingsView: View {
                         .parakeetAction(.secondary)
                 }
             }
+
+            // Shown whenever the feature is available, not only while the
+            // preference is on: turning it off must not hide the only surface
+            // that can delete what is already stored.
+            HStack(spacing: DesignSystem.Spacing.sm) {
+                rowText(
+                    title: "Voice profiles",
+                    detail: "See and delete the voices saved on this Mac."
+                )
+                Spacer(minLength: DesignSystem.Spacing.md)
+                Button("Manage…") { showVoiceProfiles = true }
+                    .parakeetAction(.secondary)
+            }
         }
         .sheet(isPresented: $viewModel.isRequestingVoiceprintConsent) {
             VoiceProfileConsentSheet(viewModel: viewModel)
+        }
+        .sheet(isPresented: $showVoiceProfiles) {
+            VoiceProfilesSheet(viewModel: voiceProfilesViewModel)
         }
     }
 
@@ -2032,6 +2054,28 @@ struct SettingsView: View {
                             perform: viewModel.clearDownloadedYouTubeAudio
                         )
                     )
+
+                    // In Reset & Cleanup as well as inside the feature block:
+                    // this is where people look for "delete my data", and it
+                    // has to be findable without knowing where voices come
+                    // from. Shown even with the feature off, since voices can
+                    // already be stored.
+                    if AppFeatures.isVoiceProfilesAvailable() {
+                        Divider()
+
+                        resetActionRow(
+                            title: "Voice profiles",
+                            detail: "Saved voices and any still waiting to be named. Names already applied to transcripts stay.",
+                            action: ResetDestructiveAction(
+                                buttonTitle: "Forget…",
+                                accessibilityLabel: "Forget all voice profiles",
+                                confirmationTitle: "Forget All Voices?",
+                                confirmationMessage: "This deletes every saved voice, its samples, and any voices still waiting to be named. Names already applied to your transcripts stay as they are. This cannot be undone.",
+                                confirmButtonLabel: "Forget All",
+                                perform: { Task { await voiceProfilesViewModel.forgetAll() } }
+                            )
+                        )
+                    }
 
                     Divider()
 

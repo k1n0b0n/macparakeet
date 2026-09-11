@@ -72,6 +72,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let libraryViewModel = TranscriptionLibraryViewModel()
     private let meetingsLibraryViewModel = TranscriptionLibraryViewModel(scope: .meetings)
     private let llmSettingsViewModel = LLMSettingsViewModel()
+    /// Built with the service only when the feature is available, so the sheet
+    /// shows its empty state rather than reading a store nothing can write.
+    private lazy var voiceProfilesViewModel = VoiceProfilesViewModel(
+        service: AppFeatures.isVoiceProfilesAvailable()
+            ? appEnvironment?.speakerVoiceprintService : nil
+    )
     private let chatViewModel = TranscriptChatViewModel()
     private let promptResultsViewModel = PromptResultsViewModel()
     private let promptsViewModel = PromptsViewModel()
@@ -194,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         historyViewModel: historyViewModel,
         settingsViewModel: settingsViewModel,
         llmSettingsViewModel: llmSettingsViewModel,
+        voiceProfilesViewModel: voiceProfilesViewModel,
         chatViewModel: chatViewModel,
         promptResultsViewModel: promptResultsViewModel,
         promptsViewModel: promptsViewModel,
