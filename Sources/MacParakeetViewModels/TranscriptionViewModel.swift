@@ -144,6 +144,12 @@ public final class TranscriptionViewModel {
                 speakerCorrectionsApplied = false
                 canUndoSpeakerCorrection = false
                 canRedoSpeakerCorrection = false
+                // An offer belongs to one version of the diarization, not to a
+                // transcription id: re-transcribing reloads the same row in
+                // place, and `speakerId` is positional, so a surviving offer
+                // could name a different person's voice.
+                dismissVoiceEnrollment()
+                voiceEnrollmentMessage = nil
             }
             if let currentTranscription {
                 loadSpeakerAttribution(for: currentTranscription)
@@ -2123,7 +2129,10 @@ public final class TranscriptionViewModel {
     }
 
     /// What the user is being offered, or the outcome of what they accepted.
-    public private(set) var pendingVoiceEnrollment: PendingVoiceEnrollment?
+    ///
+    /// `internal(set)` so tests can stage a stale offer and prove the
+    /// confirmation guard holds; views only read it.
+    public internal(set) var pendingVoiceEnrollment: PendingVoiceEnrollment?
     public private(set) var voiceEnrollmentMessage: String?
     /// A second name already owns this voice, so accepting would merge two
     /// people. The user has to say which it is.
@@ -2175,6 +2184,16 @@ public final class TranscriptionViewModel {
         guard let offer = allowMerge ? voiceEnrollmentConflict : pendingVoiceEnrollment,
               let speakerVoiceprints
         else { return }
+        // Re-checked here rather than trusted from the offer: this is a public
+        // value an unrelated caller could resubmit, and enrollment is a write
+        // the user cannot take back. The fingerprint, not the transcription id
+        // — the same row re-transcribed keeps its id and changes its speakers.
+        guard currentTranscription?.id == offer.transcriptionId,
+              speakerAttribution?.fingerprint == offer.fingerprint
+        else {
+            dismissVoiceEnrollment()
+            return
+        }
         pendingVoiceEnrollment = nil
         voiceEnrollmentConflict = nil
 
