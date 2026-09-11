@@ -288,6 +288,7 @@ public final class TranscriptionViewModel {
     private var promptResultRepo: PromptResultRepositoryProtocol?
     private var speakerAttributionReader: SpeakerAttributionReading?
     private var speakerCorrectionService: SpeakerCorrectionServicing?
+    private var speakerVoiceprints: SpeakerVoiceprintServicing?
     private var speakerAttributionLoadToken: UUID?
     private var speakerAttributionTranscriptionID: UUID?
     private var transcriptionTask: Task<Void, Never>?
@@ -369,7 +370,8 @@ public final class TranscriptionViewModel {
         promptResultRepo: PromptResultRepositoryProtocol? = nil,
         promptResultsViewModel: PromptResultsViewModel? = nil,
         speakerAttributionReader: SpeakerAttributionReading? = nil,
-        speakerCorrectionService: SpeakerCorrectionServicing? = nil
+        speakerCorrectionService: SpeakerCorrectionServicing? = nil,
+        speakerVoiceprints: SpeakerVoiceprintServicing? = nil
     ) {
         self.transcriptionService = transcriptionService
         self.audioTrackService =
@@ -381,6 +383,7 @@ public final class TranscriptionViewModel {
         self.promptResultsViewModel = promptResultsViewModel
         self.speakerAttributionReader = speakerAttributionReader
         self.speakerCorrectionService = speakerCorrectionService
+        self.speakerVoiceprints = speakerVoiceprints
         isConfigured = true
         clearError()
         loadTranscriptions()
@@ -2109,6 +2112,109 @@ public final class TranscriptionViewModel {
 
     // MARK: - Speaker Rename
 
+    /// An offer to remember the voice just named. Held only while the user has
+    /// not answered; nothing is stored until they accept.
+    public struct PendingVoiceEnrollment: Sendable, Equatable {
+        public let speakerId: String
+        public let displayName: String
+        public let transcriptionId: UUID
+        public let fingerprint: TranscriptFingerprint
+        let observation: SpeakerClusterObservation
+    }
+
+    /// What the user is being offered, or the outcome of what they accepted.
+    public private(set) var pendingVoiceEnrollment: PendingVoiceEnrollment?
+    public private(set) var voiceEnrollmentMessage: String?
+    /// A second name already owns this voice, so accepting would merge two
+    /// people. The user has to say which it is.
+    public private(set) var voiceEnrollmentConflict: PendingVoiceEnrollment?
+
+    public func dismissVoiceEnrollment() {
+        pendingVoiceEnrollment = nil
+        voiceEnrollmentConflict = nil
+    }
+
+    public func clearVoiceEnrollmentMessage() {
+        voiceEnrollmentMessage = nil
+    }
+
+    /// Offers to remember the voice, but only once the store confirms a
+    /// candidate still exists for this speaker — otherwise the prompt would
+    /// promise something enrollment would then refuse. Silent when the feature
+    /// is off, the window has lapsed, or the speaker spoke too briefly.
+    private func offerVoiceEnrollment(speakerId: String, displayName: String) {
+        guard let speakerVoiceprints,
+              let transcriptionId = currentTranscription?.id,
+              let fingerprint = speakerAttribution?.fingerprint
+        else { return }
+
+        Task { [weak self] in
+            let observation = try? await speakerVoiceprints.enrollmentCandidate(
+                transcriptionId: transcriptionId,
+                speakerId: speakerId,
+                fingerprint: fingerprint
+            )
+            guard let observation else { return }
+            await MainActor.run {
+                guard self?.currentTranscription?.id == transcriptionId else { return }
+                self?.pendingVoiceEnrollment = PendingVoiceEnrollment(
+                    speakerId: speakerId,
+                    displayName: displayName,
+                    transcriptionId: transcriptionId,
+                    fingerprint: fingerprint,
+                    observation: observation
+                )
+            }
+        }
+    }
+
+    /// Accepts the offer. `allowMerge` is the answer to a name conflict, so it
+    /// is false on the first attempt and true only when the user has said the
+    /// two voices are the same person.
+    public func confirmVoiceEnrollment(allowMerge: Bool = false) {
+        guard let offer = allowMerge ? voiceEnrollmentConflict : pendingVoiceEnrollment,
+              let speakerVoiceprints
+        else { return }
+        pendingVoiceEnrollment = nil
+        voiceEnrollmentConflict = nil
+
+        Task { [weak self] in
+            do {
+                let outcome = try await speakerVoiceprints.enroll(
+                    displayName: offer.displayName,
+                    observation: offer.observation,
+                    transcriptionId: offer.transcriptionId,
+                    fingerprint: offer.fingerprint,
+                    allowMergeIntoExistingName: allowMerge
+                )
+                await MainActor.run { self?.publish(outcome, for: offer) }
+            } catch {
+                await MainActor.run {
+                    self?.voiceEnrollmentMessage = "Could not remember this voice."
+                }
+            }
+        }
+    }
+
+    private func publish(_ outcome: SpeakerProfileEnrollment, for offer: PendingVoiceEnrollment) {
+        switch outcome {
+        case .created, .addedExemplar:
+            voiceEnrollmentMessage = "\(offer.displayName)'s voice will be suggested in later meetings."
+        case .alreadySampled:
+            voiceEnrollmentMessage = "\(offer.displayName) already has a sample from this recording."
+        case .needsDisambiguation:
+            // Deliberately not phrased as an error: the likeliest cause is two
+            // people who share a first name, which is not a mistake.
+            voiceEnrollmentConflict = offer
+        case .rejectedTooShort:
+            voiceEnrollmentMessage = "Not enough speech from \(offer.displayName) to remember their voice."
+        case .rejectedProfileFull:
+            voiceEnrollmentMessage = "\(offer.displayName) already has the maximum number of voice samples."
+        case .rejectedEmptyName:
+            voiceEnrollmentMessage = nil
+        }
+    }
+
     /// Returns `false` only when the rename must be retried later because
     /// speaker corrections are still loading or saving.
     @discardableResult
@@ -2126,7 +2232,14 @@ public final class TranscriptionViewModel {
                 return false
             }
             clearError()
-            return applySpeakerCorrection(.rename(speakerID: speakerId, label: trimmed))
+            guard applySpeakerCorrection(.rename(speakerID: speakerId, label: trimmed)) else {
+                return false
+            }
+            // Offered alongside the label write, not after it: the two are
+            // independent stores, and the offer only appears once the voice
+            // store confirms it can still act on it.
+            offerVoiceEnrollment(speakerId: speakerId, displayName: trimmed)
+            return true
         }
         guard var transcription = currentTranscription,
             var speakers = transcription.speakers
