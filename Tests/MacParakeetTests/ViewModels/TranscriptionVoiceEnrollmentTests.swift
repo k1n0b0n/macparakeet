@@ -87,16 +87,26 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
     ) async throws {}
 }
 
+/// Resolves each snapshot it is handed rather than replaying a fixed one, so a
+/// re-diarized transcription yields a different fingerprint — which is what the
+/// staleness guards are about.
 private final class StubAttributionReader: SpeakerAttributionReading, @unchecked Sendable {
-    private let projection: SpeakerAttributionProjection
+    private let fallback: Transcription
 
-    init(projection: SpeakerAttributionProjection) {
-        self.projection = projection
+    init(fallback: Transcription) {
+        self.fallback = fallback
     }
 
-    func resolve(transcriptionId _: UUID) throws -> SpeakerAttributionProjection? { projection }
-    func resolve(transcription _: Transcription) throws -> SpeakerAttributionProjection {
-        projection
+    func resolve(transcriptionId _: UUID) throws -> SpeakerAttributionProjection? {
+        try resolve(transcription: fallback)
+    }
+
+    func resolve(transcription: Transcription) throws -> SpeakerAttributionProjection {
+        SpeakerAttributionProjection(
+            automaticTranscription: transcription,
+            attribution: SpeakerAttributionResolver.resolve(transcription: transcription),
+            correctionsApplied: false
+        )
     }
 }
 
@@ -193,6 +203,70 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
         XCTAssertNil(viewModel.pendingVoiceEnrollment)
     }
 
+    /// Selecting another transcript must take the offer with it, or the user
+    /// would be asked to keep a voice while looking at a different meeting.
+    func testSelectingAnotherTranscriptDropsAStandingOffer() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(candidate: observation())
+        let viewModel = try await configured(transcription, voiceprints: service)
+        viewModel.renameSpeaker(id: "S1", to: "Sarah")
+        try await waitUntil { viewModel.pendingVoiceEnrollment != nil }
+
+        viewModel.currentTranscription = makeTranscription()
+
+        XCTAssertNil(viewModel.pendingVoiceEnrollment)
+        XCTAssertNil(viewModel.voiceEnrollmentConflict)
+        XCTAssertNil(viewModel.voiceEnrollmentMessage)
+    }
+
+    /// Re-transcribing reloads the *same row*, so the id never changes while
+    /// the speakers do. An offer that survived would enroll a vector from a
+    /// diarization that no longer exists, under a positional speaker id that
+    /// can now mean someone else.
+    func testRetranscribingTheSameRowDropsAStandingOffer() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(candidate: observation())
+        let viewModel = try await configured(transcription, voiceprints: service)
+        viewModel.renameSpeaker(id: "S1", to: "Sarah")
+        try await waitUntil { viewModel.pendingVoiceEnrollment != nil }
+
+        var rediarized = transcription
+        rediarized.wordTimestamps = [
+            WordTimestamp(word: "hello", startMs: 0, endMs: 400, confidence: 0.9, speakerId: "S2"),
+            WordTimestamp(word: "there", startMs: 450, endMs: 800, confidence: 0.9, speakerId: "S1"),
+        ]
+        viewModel.currentTranscription = rediarized
+
+        XCTAssertEqual(viewModel.currentTranscription?.id, transcription.id)
+        XCTAssertNil(viewModel.pendingVoiceEnrollment)
+    }
+
+    /// The offer is a public value, so the guard is re-checked at confirmation
+    /// rather than trusted from the banner's state.
+    func testConfirmingAnOfferFromAnotherDiarizationEnrollsNothing() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(candidate: observation())
+        let viewModel = try await configured(transcription, voiceprints: service)
+        viewModel.renameSpeaker(id: "S1", to: "Sarah")
+        try await waitUntil { viewModel.pendingVoiceEnrollment != nil }
+        let stale = try XCTUnwrap(viewModel.pendingVoiceEnrollment)
+
+        // Put the offer back after the diarization moved underneath it.
+        var rediarized = transcription
+        rediarized.wordTimestamps = [
+            WordTimestamp(word: "hello", startMs: 0, endMs: 400, confidence: 0.9, speakerId: "S2")
+        ]
+        viewModel.currentTranscription = rediarized
+        try await waitUntil { viewModel.speakerAttribution != nil }
+        viewModel.pendingVoiceEnrollment = stale
+
+        viewModel.confirmVoiceEnrollment()
+
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(service.enrollments.isEmpty)
+        XCTAssertNil(viewModel.pendingVoiceEnrollment)
+    }
+
     // MARK: Answering
 
     func testAcceptingEnrollsAndReportsSuccess() async throws {
@@ -277,16 +351,11 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
         voiceprints: SpeakerVoiceprintServicing?
     ) async throws -> TranscriptionViewModel {
         let attribution = SpeakerAttributionResolver.resolve(transcription: transcription)
-        let projection = SpeakerAttributionProjection(
-            automaticTranscription: transcription,
-            attribution: attribution,
-            correctionsApplied: false
-        )
         let viewModel = TranscriptionViewModel()
         viewModel.configure(
             transcriptionService: MockTranscriptionService(),
             transcriptionRepo: MockTranscriptionRepository(),
-            speakerAttributionReader: StubAttributionReader(projection: projection),
+            speakerAttributionReader: StubAttributionReader(fallback: transcription),
             speakerCorrectionService: StubCorrectionService(
                 result: SpeakerCorrectionResult(
                     attribution: attribution, revision: 1, canUndo: true, canRedo: false
