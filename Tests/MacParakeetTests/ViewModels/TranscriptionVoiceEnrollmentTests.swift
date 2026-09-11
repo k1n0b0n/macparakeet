@@ -26,17 +26,32 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
     /// `mergeEnrollment` mirrors the real service: an accepted merge skips the
     /// pollution guard, so it cannot answer with the same conflict twice.
     private let mergeEnrollment: SpeakerProfileEnrollment?
+    private let suggestions: [SpeakerVoiceprintSuggestion]
+
+    private var storedConfirmed: [String] = []
+    private var storedDismissed: [String] = []
+
+    var confirmed: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return storedConfirmed
+    }
+    var dismissed: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return storedDismissed
+    }
 
     init(
         candidate: SpeakerClusterObservation?,
         enrollment: SpeakerProfileEnrollment = .rejectedEmptyName,
         mergeEnrollment: SpeakerProfileEnrollment? = nil,
-        enrollError: Error? = nil
+        enrollError: Error? = nil,
+        suggestions: [SpeakerVoiceprintSuggestion] = []
     ) {
         self.candidate = candidate
         self.enrollment = enrollment
         self.mergeEnrollment = mergeEnrollment
         self.enrollError = enrollError
+        self.suggestions = suggestions
     }
 
     func evaluate(
@@ -74,21 +89,29 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
     }
 
     func confirm(
-        _: SpeakerVoiceprintSuggestion,
+        _ suggestion: SpeakerVoiceprintSuggestion,
         transcriptionId _: UUID,
         fingerprint _: TranscriptFingerprint
-    ) async throws {}
+    ) async throws {
+        lock.lock()
+        storedConfirmed.append(suggestion.speakerId)
+        lock.unlock()
+    }
 
     func pendingSuggestions(
         transcriptionId _: UUID,
         fingerprint _: TranscriptFingerprint
-    ) async throws -> [SpeakerVoiceprintSuggestion] { [] }
+    ) async throws -> [SpeakerVoiceprintSuggestion] { suggestions }
 
     func dismiss(
-        _: SpeakerVoiceprintSuggestion,
+        _ suggestion: SpeakerVoiceprintSuggestion,
         transcriptionId _: UUID,
         fingerprint _: TranscriptFingerprint
-    ) async throws {}
+    ) async throws {
+        lock.lock()
+        storedDismissed.append(suggestion.speakerId)
+        lock.unlock()
+    }
 }
 
 /// Resolves each snapshot it is handed rather than replaying a fixed one, so a
@@ -154,6 +177,72 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
         embeddingModelId: "test-model",
         aggregationProfileId: "test-aggregation"
     )
+
+    // MARK: Suggestions
+
+    func testPendingSuggestionsLoadWithTheTranscript() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(
+            candidate: observation(), suggestions: [suggestion()]
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+
+        try await waitUntil { !viewModel.voiceSuggestions.isEmpty }
+        XCTAssertEqual(viewModel.voiceSuggestions.map(\.displayName), ["Sarah"])
+    }
+
+    /// Confirming applies the label through the correction layer, which is what
+    /// carries undo and provenance — the voiceprint layer only records the
+    /// answer.
+    func testConfirmingASuggestionRenamesAndRecordsTheAnswer() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(
+            candidate: observation(), suggestions: [suggestion()]
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+        try await waitUntil { !viewModel.voiceSuggestions.isEmpty }
+
+        viewModel.confirmVoiceSuggestion(try XCTUnwrap(viewModel.voiceSuggestions.first))
+
+        try await waitUntil { service.confirmed == ["S1"] }
+        XCTAssertTrue(viewModel.voiceSuggestions.isEmpty)
+    }
+
+    func testDismissingASuggestionRecordsTheRefusalAndAppliesNoLabel() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(
+            candidate: observation(), suggestions: [suggestion()]
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+        try await waitUntil { !viewModel.voiceSuggestions.isEmpty }
+
+        viewModel.dismissVoiceSuggestion(try XCTUnwrap(viewModel.voiceSuggestions.first))
+
+        try await waitUntil { service.dismissed == ["S1"] }
+        XCTAssertTrue(viewModel.voiceSuggestions.isEmpty)
+        XCTAssertTrue(service.confirmed.isEmpty)
+        // The speaker keeps the label the transcript had.
+        XCTAssertEqual(viewModel.currentTranscription?.speakers?.first?.label, "Others 1")
+    }
+
+    /// Suggestions name positional speakers, so a re-diarization must clear
+    /// them rather than let them point at whoever "S1" now is.
+    func testRetranscribingClearsPendingSuggestions() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(
+            candidate: observation(), suggestions: [suggestion()]
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+        try await waitUntil { !viewModel.voiceSuggestions.isEmpty }
+
+        var rediarized = transcription
+        rediarized.wordTimestamps = [
+            WordTimestamp(word: "hello", startMs: 0, endMs: 400, confidence: 0.9, speakerId: "S2")
+        ]
+        viewModel.currentTranscription = rediarized
+
+        XCTAssertTrue(viewModel.voiceSuggestions.isEmpty)
+    }
 
     // MARK: Offering
 
@@ -450,6 +539,16 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
         viewModel.currentTranscription = transcription
         try await waitUntil { viewModel.speakerAttribution != nil }
         return viewModel
+    }
+
+    private func suggestion() -> SpeakerVoiceprintSuggestion {
+        SpeakerVoiceprintSuggestion(
+            speakerId: "S1",
+            profileId: UUID(),
+            displayName: "Sarah",
+            distance: 0.12,
+            runnerUpDistance: 0.48
+        )
     }
 
     private func observation() -> SpeakerClusterObservation {
