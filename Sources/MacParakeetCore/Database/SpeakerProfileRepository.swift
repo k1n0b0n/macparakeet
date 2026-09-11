@@ -12,6 +12,8 @@ public enum SpeakerProfileStoreError: Error, Equatable {
     /// A name that normalizes to nothing has no lookup key, so it could neither
     /// be found again nor keep a second blank name from colliding with it.
     case emptyDisplayName
+    /// A replacement may contain only pending links for its requested scope.
+    case invalidSuggestionScope
     /// A decision the user already made is not overwritten by a fresh
     /// suggestion.
     case terminalDecisionAlreadyRecorded(status: SpeakerProfileLink.Status)
@@ -70,6 +72,11 @@ public protocol SpeakerProfileRepositoryProtocol: Sendable {
     /// Rows from an earlier fingerprint are deliberately invisible here.
     func links(transcriptionId: UUID, fingerprint: String) throws -> [SpeakerProfileLink]
     func save(_ link: SpeakerProfileLink) throws
+    /// Replaces pending offers for one run atomically, preserving terminal choices.
+    /// Returns the offers still allowed after checking current terminal decisions.
+    func replaceSuggestions(
+        transcriptionId: UUID, fingerprint: String, with links: [SpeakerProfileLink]
+    ) throws -> [SpeakerProfileLink]
     /// Removes a profile with its samples and decisions in one transaction.
     /// Transcripts and labels already applied are untouched.
     func deleteProfile(id: UUID) throws -> Bool
@@ -229,7 +236,7 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
                     exemplar: exemplar.embeddingModelId
                 )
             }
-            try exemplar.insert(db)
+            try insertExemplarRecord(exemplar, db: db)
         }
     }
 
@@ -295,8 +302,19 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
             evicted = target.id
         }
 
-        try exemplar.insert(db)
+        try insertExemplarRecord(exemplar, db: db)
         return evicted.map { .insertedEvicting($0) } ?? .inserted
+    }
+
+    private func insertExemplarRecord(_ exemplar: SpeakerProfileExemplar, db: Database) throws {
+        guard let sourceId = exemplar.sourceTranscriptionId else {
+            try exemplar.insert(db)
+            return
+        }
+        try SpeakerTranscriptionRecord(
+            record: exemplar, column: "sourceTranscriptionId",
+            transcriptionKey: SpeakerTranscriptionPersistence.key(sourceId, in: db)
+        ).insert(db)
     }
 
     public func deleteExemplar(id: UUID) throws -> Bool {
@@ -309,8 +327,10 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
 
     public func links(transcriptionId: UUID, fingerprint: String) throws -> [SpeakerProfileLink] {
         try dbQueue.read { db in
-            try SpeakerProfileLink
-                .filter(Column("transcriptionId") == transcriptionId)
+            let key = try SpeakerTranscriptionPersistence.key(transcriptionId, in: db)
+            return
+                try SpeakerProfileLink
+                .filter(Column("transcriptionId") == key)
                 .filter(Column("transcriptFingerprint") == fingerprint)
                 .fetchAll(db)
         }
@@ -322,9 +342,10 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
     public func save(_ link: SpeakerProfileLink) throws {
         try dbQueue.write { db in
             var link = link
+            let key = try SpeakerTranscriptionPersistence.key(link.transcriptionId, in: db)
             let existing =
                 try SpeakerProfileLink
-                .filter(Column("transcriptionId") == link.transcriptionId)
+                .filter(Column("transcriptionId") == key)
                 .filter(Column("speakerId") == link.speakerId)
                 .filter(Column("transcriptFingerprint") == link.transcriptFingerprint)
                 .fetchOne(db)
@@ -343,7 +364,49 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
                 }
                 link.createdAt = existing.createdAt
             }
-            try link.save(db)
+            try SpeakerTranscriptionRecord(
+                record: link, column: "transcriptionId", transcriptionKey: key
+            ).save(db)
+        }
+    }
+
+    public func replaceSuggestions(
+        transcriptionId: UUID, fingerprint: String, with links: [SpeakerProfileLink]
+    ) throws -> [SpeakerProfileLink] {
+        guard
+            links.allSatisfy({
+                $0.status == .suggested && $0.transcriptionId == transcriptionId
+                    && $0.transcriptFingerprint == fingerprint
+            })
+        else {
+            throw SpeakerProfileStoreError.invalidSuggestionScope
+        }
+        return try dbQueue.write { db in
+            let key = try SpeakerTranscriptionPersistence.key(transcriptionId, in: db)
+            let scope =
+                SpeakerProfileLink
+                .filter(Column("transcriptionId") == key)
+                .filter(Column("transcriptFingerprint") == fingerprint)
+            let existing = try scope.fetchAll(db)
+            let terminalSpeakers = Set(existing.filter { $0.status != .suggested }.map(\.speakerId))
+            let reservedProfiles = Set(existing.filter { $0.status == .confirmed }.map(\.profileId))
+            let originalDates = Dictionary(uniqueKeysWithValues: existing.map { ($0.speakerId, $0.createdAt) })
+            try scope.filter(Column("status") == SpeakerProfileLink.Status.suggested.rawValue).deleteAll(db)
+
+            var stored: [SpeakerProfileLink] = []
+            for var link in links {
+                // Recheck inside this write: a user may have answered while the
+                // matcher was scoring. Never replace that answer or its name.
+                guard !terminalSpeakers.contains(link.speakerId), !reservedProfiles.contains(link.profileId) else {
+                    continue
+                }
+                link.createdAt = originalDates[link.speakerId] ?? link.createdAt
+                try SpeakerTranscriptionRecord(
+                    record: link, column: "transcriptionId", transcriptionKey: key
+                ).insert(db)
+                stored.append(link)
+            }
+            return stored
         }
     }
 

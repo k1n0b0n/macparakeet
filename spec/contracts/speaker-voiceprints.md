@@ -57,8 +57,9 @@ The future opt-in UI must disclose candidate retention before the first write.
   rename a transcript automatically; confirmation uses the existing correction
   path, and profile links carry identity provenance separately.
 - Current policy is experimental: cosine distance `tau = 0.25`, margin `0.10`,
-  minimum cluster speech of 3 seconds to match and 15 seconds to enroll or retain
-  a candidate. These are duration gates, not clean-span or overlap filtering.
+  minimum cluster speech of 3 seconds to match and 15 seconds to enroll, learn
+  from a confirmation or retain a candidate. A shorter match can still be
+  confirmed without storing an exemplar. These are duration gates, not clean-span or overlap filtering.
   Whole-cluster centroids can contain diarization errors; naming a cluster does
   not repair its attribution.
 - An embedding-model mismatch prevents comparison. An aggregation-profile
@@ -98,7 +99,15 @@ can leave a redundant, expiring copy; it must never discard a candidate before
 its exemplar is persisted. A rejected insertion, including a profile filled with
 manual enrollments, preserves the candidate for its remaining retention window. A
 confirmed label does not imply a sample was learned: confirmation-driven learning
-requires two manual enrollment anchors and must respect the cap and model rules.
+requires two manual enrollment anchors and must respect the duration, cap and
+model rules. Re-evaluation replaces pending suggestions for that transcript
+fingerprint while preserving confirmed and dismissed choices.
+Journal outcomes describe scoring, not proof that an offer was displayed: a
+concurrent terminal choice may suppress publication after the score was computed.
+
+Voiceprint repositories preserve the actual SQLite representation of each parent
+transcription identifier when writing or querying references. Both historical
+TEXT UUIDs and current BLOB UUIDs are supported without rewriting existing rows.
 
 Deleting a profile atomically removes its exemplars, links and referenced journal
 rows; transcript labels and speaker corrections survive. Deleting a transcription
@@ -143,11 +152,14 @@ deletion cascades and transcript-label preservation. Flag verification must also
 check that a release build ignores the DEBUG override.
 
 Outward-boundary verification must exercise populated voiceprint tables against
-the app and CLI export projections and feedback/diagnostic builders. Relevant
-existing suites include `SpeakerVoiceprintExportTests`, `ExportServiceTests`,
-`ExportCommandTests` and `FeedbackServiceTests`; a release review must record which surfaces were tested
-and which were only inspected. Tests listed here are required coverage, not a
-claim that every release surface or real-audio scenario has already passed.
+the app and CLI export projections. Inspect feedback and diagnostic builders for
+database access and attachment selection, and run their existing tests. If these
+builders gain library-storage inputs, add populated-table exclusion fixtures at
+that boundary. Relevant suites include `SpeakerVoiceprintExportTests`,
+`ExportServiceTests`, `ExportCommandTests` and `FeedbackServiceTests`. A release
+review must record which surfaces were tested and which were only inspected.
+Tests listed here are required coverage, not a claim that every release surface
+or real-audio scenario has already passed.
 
 Before official release, record held-out meeting precision and coverage before
 correction, unknown-speaker false matches, sample counts and uncertainty under

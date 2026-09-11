@@ -948,6 +948,56 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         XCTAssertEqual(stored.first?.status, .dismissed)
     }
 
+    func testReplacingSuggestionsRechecksTerminalDecisionsInsideTheWrite() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let otherProfile = try enrolledProfile(named: "Alex")
+        let recording = try savedTranscription()
+        let staleOffer = link(transcriptionId: recording.id, profileId: profile.id)
+        try repo.save(staleOffer)
+
+        // Simulate an answer after the matcher took its snapshot.
+        var confirmed = staleOffer
+        confirmed.status = .confirmed
+        try repo.save(confirmed)
+        var siblingOffer = staleOffer
+        siblingOffer.speakerId = "system:S2"
+        var unrelatedOffer = staleOffer
+        unrelatedOffer.speakerId = "system:S3"
+        unrelatedOffer.profileId = otherProfile.id
+        var oldScope = staleOffer
+        oldScope.transcriptFingerprint = "other-fingerprint"
+        try repo.save(oldScope)
+
+        let published = try repo.replaceSuggestions(
+            transcriptionId: recording.id, fingerprint: "fingerprint",
+            with: [staleOffer, siblingOffer, unrelatedOffer]
+        )
+        XCTAssertEqual(published.map(\.speakerId), ["system:S3"])
+        let links = try repo.links(transcriptionId: recording.id, fingerprint: "fingerprint")
+        XCTAssertEqual(Set(links.map(\.speakerId)), ["system:S1", "system:S3"])
+        XCTAssertEqual(links.first { $0.speakerId == "system:S1" }?.status, .confirmed)
+        let untouched = try repo.links(transcriptionId: recording.id, fingerprint: "other-fingerprint")
+        XCTAssertEqual(untouched.count, 1)
+        XCTAssertEqual(untouched.first?.status, .suggested)
+        XCTAssertEqual(untouched.first?.profileId, profile.id)
+    }
+
+    func testFailedSuggestionReplacementRollsBackRemovedOffers() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let recording = try savedTranscription()
+        let original = link(transcriptionId: recording.id, profileId: profile.id)
+        try repo.save(original)
+        var invalid = original
+        invalid.profileId = UUID()
+        XCTAssertThrowsError(
+            try repo.replaceSuggestions(transcriptionId: recording.id, fingerprint: "fingerprint", with: [invalid])
+        )
+        let remaining = try repo.links(transcriptionId: recording.id, fingerprint: "fingerprint")
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining.first?.profileId, profile.id)
+        XCTAssertEqual(remaining.first?.status, .suggested)
+    }
+
     // MARK: Helpers
 
     private func makeEmbedding(index: Int) -> SpeakerEmbedding {

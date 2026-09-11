@@ -1119,6 +1119,128 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         XCTAssertEqual(exemplars.filter { $0.origin == .confirmedSuggestion }.count, 1)
     }
 
+    func testConfirmedShortMatchesDoNotLearnUntilTheEnrollmentDurationBoundary() async throws {
+        let first = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: first.id)
+        let second = try savedTranscription()
+        let matchedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let service = makeService(now: matchedAt)
+        _ = try await service.enroll(
+            displayName: "Sarah", observation: cluster("S1", voice: 0, degrees: 14.1),
+            transcriptionId: second.id, fingerprint: fingerprint, allowMergeIntoExistingName: false
+        )
+
+        for duration in [3.0, 14.999, 15.0] {
+            let recording = try savedTranscription()
+            let observation = cluster("S1", voice: 0, degrees: 14.1, speechSeconds: duration)
+            let offers = try await service.evaluate(
+                transcriptionId: recording.id, fingerprint: fingerprint, clusters: [observation]
+            )
+            try await service.confirm(
+                try XCTUnwrap(offers.first), observation: observation,
+                transcriptionId: recording.id, fingerprint: fingerprint
+            )
+            XCTAssertEqual(
+                try profiles.links(transcriptionId: recording.id, fingerprint: fingerprint.rawValue).map(\.status),
+                [.confirmed]
+            )
+            XCTAssertEqual(try profiles.profile(id: profile.id)?.lastMatchedAt, matchedAt)
+            let learned = try profiles.exemplars(profileId: profile.id).filter { $0.origin == .confirmedSuggestion }
+            XCTAssertEqual(learned.count, duration < 15 ? 0 : 1)
+            if duration == 15 {
+                XCTAssertEqual(learned.first?.sourceTranscriptionId, recording.id)
+                XCTAssertEqual(learned.first?.speechSeconds, 15)
+            }
+        }
+    }
+
+    func testRescoringPastThresholdRemovesThePreviousPendingSuggestion() async throws {
+        let enrollment = try savedTranscription()
+        _ = try await enrolledSarah(transcriptionId: enrollment.id)
+        let recording = try savedTranscription()
+        let service = makeService()
+        let first = try await service.evaluate(
+            transcriptionId: recording.id, fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 14.1)]
+        )
+        XCTAssertEqual(first.count, 1)
+        let second = try await service.evaluate(
+            transcriptionId: recording.id, fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 80)]
+        )
+        XCTAssertTrue(second.isEmpty)
+        XCTAssertTrue(try profiles.links(transcriptionId: recording.id, fingerprint: fingerprint.rawValue).isEmpty)
+        XCTAssertTrue(try journal.entries().contains { $0.outcome == .pastThreshold })
+    }
+
+    func testRescoringWithAnAmbiguousProfileRemovesThePreviousPendingSuggestion() async throws {
+        let enrollment = try savedTranscription()
+        _ = try await enrolledSarah(transcriptionId: enrollment.id)
+        let recording = try savedTranscription()
+        let service = makeService()
+        let observation = cluster("S1", voice: 0, degrees: 14.1)
+        let first = try await service.evaluate(
+            transcriptionId: recording.id, fingerprint: fingerprint, clusters: [observation]
+        )
+        XCTAssertEqual(first.count, 1)
+        let other = try savedTranscription()
+        _ = try await service.enroll(
+            displayName: "Alex", observation: cluster("S1", voice: 0, degrees: 20),
+            transcriptionId: other.id, fingerprint: fingerprint, allowMergeIntoExistingName: false
+        )
+        let second = try await service.evaluate(
+            transcriptionId: recording.id, fingerprint: fingerprint, clusters: [observation]
+        )
+        XCTAssertTrue(second.isEmpty)
+        XCTAssertTrue(try profiles.links(transcriptionId: recording.id, fingerprint: fingerprint.rawValue).isEmpty)
+        XCTAssertTrue(try journal.entries().contains { $0.outcome == .marginTooSmall })
+    }
+
+    func testEmptyRescoringClearsPendingLinksButPreservesDecisionsAndOtherFingerprints() async throws {
+        let enrollment = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: enrollment.id)
+        let recording = try savedTranscription()
+        let service = makeService()
+        for (speaker, status, scope) in [
+            ("S1", SpeakerProfileLink.Status.suggested, fingerprint.rawValue),
+            ("S2", .confirmed, fingerprint.rawValue),
+            ("S3", .dismissed, fingerprint.rawValue),
+            ("S1", .suggested, "other-fingerprint"),
+        ] {
+            try profiles.save(
+                SpeakerProfileLink(
+                    transcriptionId: recording.id, speakerId: speaker, transcriptFingerprint: scope,
+                    profileId: profile.id, status: status, distance: 0.1
+                ))
+        }
+        _ = try await service.evaluate(transcriptionId: recording.id, fingerprint: fingerprint, clusters: [])
+        let remaining = try profiles.links(transcriptionId: recording.id, fingerprint: fingerprint.rawValue)
+        XCTAssertEqual(Set(remaining.map(\.speakerId)), ["S2", "S3"])
+        XCTAssertEqual(remaining.first { $0.speakerId == "S2" }?.status, .confirmed)
+        XCTAssertEqual(remaining.first { $0.speakerId == "S3" }?.status, .dismissed)
+        XCTAssertEqual(try profiles.links(transcriptionId: recording.id, fingerprint: "other-fingerprint").count, 1)
+    }
+
+    func testNoComparableProfilesClearsPendingLinks() async throws {
+        let enrollment = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: enrollment.id)
+        let recording = try savedTranscription()
+        let service = makeService()
+        let observation = cluster("S1", voice: 0, degrees: 14.1)
+        let first = try await service.evaluate(
+            transcriptionId: recording.id, fingerprint: fingerprint, clusters: [observation]
+        )
+        XCTAssertEqual(first.count, 1)
+        for exemplar in try profiles.exemplars(profileId: profile.id) {
+            XCTAssertTrue(try profiles.deleteExemplar(id: exemplar.id))
+        }
+        let second = try await service.evaluate(
+            transcriptionId: recording.id, fingerprint: fingerprint, clusters: [observation]
+        )
+        XCTAssertTrue(second.isEmpty)
+        XCTAssertTrue(try profiles.links(transcriptionId: recording.id, fingerprint: fingerprint.rawValue).isEmpty)
+    }
+
     // MARK: Helpers
 
     /// Reads `enabled` once, at construction: capturing it lazily would put the
@@ -1244,6 +1366,11 @@ private final class NameHidingStore: SpeakerProfileRepositoryProtocol, @unchecke
         try wrapped.links(transcriptionId: transcriptionId, fingerprint: fingerprint)
     }
     func save(_ link: SpeakerProfileLink) throws { try wrapped.save(link) }
+    func replaceSuggestions(
+        transcriptionId: UUID, fingerprint: String, with links: [SpeakerProfileLink]
+    ) throws -> [SpeakerProfileLink] {
+        try wrapped.replaceSuggestions(transcriptionId: transcriptionId, fingerprint: fingerprint, with: links)
+    }
     func deleteProfile(id: UUID) throws -> Bool { try wrapped.deleteProfile(id: id) }
     func deleteAllProfiles() throws { try wrapped.deleteAllProfiles() }
 }

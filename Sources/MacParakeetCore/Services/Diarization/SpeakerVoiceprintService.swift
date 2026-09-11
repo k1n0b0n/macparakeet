@@ -117,7 +117,13 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         fingerprint: TranscriptFingerprint,
         clusters: [SpeakerClusterObservation]
     ) async throws -> [SpeakerVoiceprintSuggestion] {
-        guard isEnabled(), !clusters.isEmpty else { return [] }
+        guard isEnabled() else { return [] }
+        guard !clusters.isEmpty else {
+            _ = try profiles.replaceSuggestions(
+                transcriptionId: transcriptionId, fingerprint: fingerprint.rawValue, with: []
+            )
+            return []
+        }
 
         // Ahead of every matching early return: the run that matters most for
         // enrollment is the first one, when no profile exists yet and there is
@@ -125,7 +131,12 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         try retainCandidates(clusters, transcriptionId: transcriptionId, fingerprint: fingerprint)
 
         let candidates = try profileCandidates()
-        guard !candidates.isEmpty else { return [] }
+        guard !candidates.isEmpty else {
+            _ = try profiles.replaceSuggestions(
+                transcriptionId: transcriptionId, fingerprint: fingerprint.rawValue, with: []
+            )
+            return []
+        }
 
         // Terminal clusters still compete: dropping them before scoring lets a
         // sibling inherit the same voice with a manufactured margin. Confirmed
@@ -154,8 +165,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
             )
         }
 
-        try record(decisions, transcriptionId: transcriptionId, fingerprint: fingerprint)
-        return decisions.compactMap(\.suggestion)
+        return try record(decisions, transcriptionId: transcriptionId, fingerprint: fingerprint)
     }
 
     // MARK: Enrollment
@@ -350,9 +360,12 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
 
         // A profile born of one enrollment cannot amplify itself on its own
         // suggestion: two manual enrollments must anchor the voice first. The
-        // one-sample-per-recording rule is the store's, so no check here.
+        // one-sample-per-recording rule is the store's. A short match can be
+        // confirmed, but it cannot bypass the minimum duration for learning.
         let exemplars = try profiles.exemplars(profileId: profile.id)
-        if exemplars.filter({ $0.origin == .manualEnrollment }).count >= 2 {
+        if observation.speechSeconds >= policy.minSpeechSecondsToEnroll,
+            exemplars.filter({ $0.origin == .manualEnrollment }).count >= 2
+        {
             switch try addExemplar(
                 to: profile,
                 observation: observation,
@@ -550,10 +563,12 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         _ decisions: [SpeakerMatchDecision],
         transcriptionId: UUID,
         fingerprint: TranscriptFingerprint
-    ) throws {
-        for decision in decisions {
-            guard let suggestion = decision.suggestion else { continue }
-            try profiles.save(
+    ) throws -> [SpeakerVoiceprintSuggestion] {
+        let suggestions = decisions.compactMap(\.suggestion)
+        let stored = try profiles.replaceSuggestions(
+            transcriptionId: transcriptionId,
+            fingerprint: fingerprint.rawValue,
+            with: suggestions.map { suggestion in
                 SpeakerProfileLink(
                     transcriptionId: transcriptionId,
                     speakerId: suggestion.speakerId,
@@ -565,8 +580,9 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                     createdAt: now(),
                     updatedAt: now()
                 )
-            )
-        }
+            }
+        )
+        let offeredSpeakers = Set(stored.map(\.speakerId))
 
         // Scored is not matched: this is what tells "never recognized" apart
         // from "recognized and wrong".
@@ -600,5 +616,6 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
             retention: SpeakerMatchJournalRepository.defaultRetention,
             now: now()
         )
+        return suggestions.filter { offeredSpeakers.contains($0.speakerId) }
     }
 }

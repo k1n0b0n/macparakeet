@@ -52,6 +52,34 @@ Classification names are local user data and are not telemetry dimensions.
 SQLite is the mutable source of truth; meeting artifact JSON and Markdown are
 materialized projections refreshed after classification changes.
 
+## Experimental speaker identity memory (2026-09-10)
+
+Migrations v0.39–v0.41 add optional local voice profiles. The compiled release
+flag remains off; creating the schema does not opt the user into retaining voices.
+The [speaker voiceprint contract](contracts/speaker-voiceprints.md) governs
+consent, matching, retention, deletion and export exclusion.
+
+| Table | Identity and constraints | Ownership |
+|-------|--------------------------|-----------|
+| `speaker_profiles` (v0.39) | UUID `id`, unique Unicode-normalized name, display name, embedding-model ID, timestamps and latest evaluation/match metadata. | Explicitly enrolled identity; retained until deletion. |
+| `speaker_profile_exemplars` (v0.39) | UUID `id`; 1024-byte vector; positive speech duration; capture domain, origin and model/aggregation IDs. Unique `(profileId, sourceTranscriptionId)`. | Composite `(profileId, embeddingModelId)` foreign key cascades on profile deletion. Source transcription is nullable and uses `ON DELETE SET NULL`. |
+| `speaker_profile_links` (v0.39) | Primary key `(transcriptionId, speakerId, transcriptFingerprint)`; profile ID, suggested/confirmed/dismissed status, distances and timestamps. | Transcription and profile foreign keys both cascade on deletion. Terminal choices survive re-evaluation; rejected pending suggestions are withdrawn. |
+| `speaker_match_journal` (v0.40) | UUID `id`; transcript/speaker/fingerprint, nullable profile ID, decision outcome, distances, speech duration and creation time. No vector. | Transcription and profile references cascade on deletion. Rows expire after 90 days. |
+| `speaker_embedding_candidates` (v0.41) | UUID `id`; unique `(transcriptionId, speakerId, transcriptFingerprint)`; vector, duration, capture/model identity, creation and explicit expiry timestamps. | Transcription deletion cascades. Unnamed voices expire after seven days and are never matching references. |
+
+The exemplar count is enforced transactionally by the repository, with a current
+policy cap of ten. New-profile creation includes its first exemplar in the same
+transaction. Global voice-profile deletion clears all five tables atomically;
+it preserves transcripts, source audio and applied speaker labels. Cleanup runs
+at startup and hourly even when the feature is disabled.
+
+Transcription foreign keys reuse the parent's actual SQLite value: existing TEXT
+UUIDs and current BLOB UUIDs retain their representation. Voiceprint repositories
+resolve that value for writes and lookups without rewriting parent records.
+Automatic speaker rosters and transcript attribution remain on `transcriptions`
+and in the correction layer; profile identity is separate and excluded from
+exports, diagnostics, feedback, telemetry and external AI context.
+
 ## Relationship Diagram (selected domains)
 
 ```
@@ -1449,6 +1477,9 @@ migrator.registerMigration("v0.7-prompts-and-summaries") { db in
 // v0.32-speaker-corrections — speaker_corrections + speaker_correction_states
 // v0.33-prompt-meeting-notes-context —
 // prompts.includeMeetingNotes and summaries.includeMeetingNotesSnapshot
+// v0.39-speaker-voiceprints — profiles, exemplars and transcript-scoped links
+// v0.40-speaker-match-journal — local expiring decision metadata
+// v0.41-speaker-embedding-candidates — expiring voices awaiting enrollment
 ```
 
 ### Migration Rules
@@ -1496,6 +1527,9 @@ migrator.registerMigration("v0.7-prompts-and-summaries") { db in
 | `prompts.inferenceSettings` | v0.31 | Nullable JSON requested settings for custom result prompts; `NULL` inherits MacParakeet defaults |
 | `summaries.inferenceSettingsSnapshot` | v0.31 | Nullable JSON receipt of effective settings sent after provider/model filtering |
 | `speaker_corrections` / `speaker_correction_states` | v0.32-speaker-corrections | Append-only attribution journal, replay index and persistent transcript-scoped undo/redo cursor |
+| `speaker_profiles` / `speaker_profile_exemplars` / `speaker_profile_links` | v0.39-speaker-voiceprints | Experimental local identity memory, samples and fingerprint-scoped decisions; release flag off |
+| `speaker_match_journal` | v0.40-speaker-match-journal | Local decision metadata with 90-day expiry; no vectors |
+| `speaker_embedding_candidates` | v0.41-speaker-embedding-candidates | Consent-gated temporary vectors with per-row seven-day expiry |
 | `prompts.includeMeetingNotes` | v0.33-prompt-meeting-notes-context | Result-prompt opt-in for automatic meeting-notes context; non-null, default false |
 | `summaries.includeMeetingNotesSnapshot` | v0.33-prompt-meeting-notes-context | Generation-time receipt of the prompt's notes-context opt-in; non-null, default false |
 | `lifetime_dictation_stats` | v0.7.4 | Singleton lifetime voice-stat counters |
@@ -1525,10 +1559,6 @@ These might be needed someday but are explicitly deferred:
 
 - **`settings`** -- Use `UserDefaults` / plist. No need for a settings table.
 - **`exports`** -- Track via `exportPath` on `transcriptions`. No separate table.
-- **`speakers`** -- The automatic roster and per-word speaker IDs remain JSON
-  on `transcriptions`; v0.32 adds only transcript-scoped correction history,
-  not a cross-recording speaker identity table. Revisit identity storage only
-  if cross-file speaker recognition is added.
 - **`usage_stats`** -- Derive aggregate usage from existing tables and `llm_runs` queries. No separate aggregate tracking table.
 
 ---

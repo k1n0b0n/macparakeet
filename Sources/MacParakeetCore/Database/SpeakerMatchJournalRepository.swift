@@ -80,7 +80,10 @@ public final class SpeakerMatchJournalRepository: SpeakerMatchJournalRepositoryP
     ) throws {
         try dbQueue.write { db in
             for entry in entries {
-                try entry.insert(db)
+                try SpeakerTranscriptionRecord(
+                    record: entry, column: "transcriptionId",
+                    transcriptionKey: SpeakerTranscriptionPersistence.key(entry.transcriptionId, in: db)
+                ).insert(db)
             }
             try deleteExpired(db, retention: retention, now: now)
         }

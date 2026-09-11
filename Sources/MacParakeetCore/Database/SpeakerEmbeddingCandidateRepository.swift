@@ -41,6 +41,7 @@ public final class SpeakerEmbeddingCandidateRepository: SpeakerEmbeddingCandidat
     public func upsert(_ candidates: [SpeakerEmbeddingCandidate], now: Date = Date()) throws {
         try dbQueue.write { db in
             for candidate in candidates {
+                let key = try SpeakerTranscriptionPersistence.key(candidate.transcriptionId, in: db)
                 // Re-diarization keeps the transcription and speaker ids while
                 // changing the fingerprint, so the natural key can collide with
                 // a row that no longer describes the same person.
@@ -51,12 +52,14 @@ public final class SpeakerEmbeddingCandidateRepository: SpeakerEmbeddingCandidat
                           AND transcriptFingerprint = ?
                         """,
                     arguments: [
-                        candidate.transcriptionId,
+                        key,
                         candidate.speakerId,
                         candidate.transcriptFingerprint,
                     ]
                 )
-                try candidate.insert(db)
+                try SpeakerTranscriptionRecord(
+                    record: candidate, column: "transcriptionId", transcriptionKey: key
+                ).insert(db)
             }
             try deleteExpired(db, now: now)
         }
@@ -72,8 +75,10 @@ public final class SpeakerEmbeddingCandidateRepository: SpeakerEmbeddingCandidat
     ) throws -> SpeakerEmbeddingCandidate? {
         try pruneExpired(now: now)
         return try dbQueue.read { db in
-            try SpeakerEmbeddingCandidate
-                .filter(Column("transcriptionId") == transcriptionId)
+            let key = try SpeakerTranscriptionPersistence.key(transcriptionId, in: db)
+            return
+                try SpeakerEmbeddingCandidate
+                .filter(Column("transcriptionId") == key)
                 .filter(Column("speakerId") == speakerId)
                 .filter(Column("transcriptFingerprint") == fingerprint)
                 .fetchOne(db)
@@ -88,7 +93,7 @@ public final class SpeakerEmbeddingCandidateRepository: SpeakerEmbeddingCandidat
                     WHERE transcriptionId = ? AND speakerId = ?
                       AND transcriptFingerprint = ?
                     """,
-                arguments: [transcriptionId, speakerId, fingerprint]
+                arguments: [try SpeakerTranscriptionPersistence.key(transcriptionId, in: db), speakerId, fingerprint]
             )
         }
     }
