@@ -27,6 +27,8 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
     /// pollution guard, so it cannot answer with the same conflict twice.
     private let mergeEnrollment: SpeakerProfileEnrollment?
     private let suggestions: [SpeakerVoiceprintSuggestion]
+    private let heldForTranscription: UUID?
+    private let release = DispatchSemaphore(value: 0)
 
     private var storedConfirmed: [String] = []
     private var storedDismissed: [String] = []
@@ -45,13 +47,15 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         enrollment: SpeakerProfileEnrollment = .rejectedEmptyName,
         mergeEnrollment: SpeakerProfileEnrollment? = nil,
         enrollError: Error? = nil,
-        suggestions: [SpeakerVoiceprintSuggestion] = []
+        suggestions: [SpeakerVoiceprintSuggestion] = [],
+        heldForTranscription: UUID? = nil
     ) {
         self.candidate = candidate
         self.enrollment = enrollment
         self.mergeEnrollment = mergeEnrollment
         self.enrollError = enrollError
         self.suggestions = suggestions
+        self.heldForTranscription = heldForTranscription
     }
 
     func evaluate(
@@ -98,10 +102,26 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         lock.unlock()
     }
 
+    /// `heldForTranscription` parks the answer for one recording so a later
+    /// selection can land first, which is the only way to exercise the
+    /// in-flight guard deterministically.
     func pendingSuggestions(
-        transcriptionId _: UUID,
+        transcriptionId: UUID,
         fingerprint _: TranscriptFingerprint
-    ) async throws -> [SpeakerVoiceprintSuggestion] { suggestions }
+    ) async throws -> [SpeakerVoiceprintSuggestion] {
+        lock.lock()
+        let held = heldForTranscription == transcriptionId
+        lock.unlock()
+        if held {
+            release.wait()
+            return suggestions
+        }
+        return heldForTranscription == nil ? suggestions : []
+    }
+
+    func releaseHeldSuggestions() {
+        release.signal()
+    }
 
     func dismiss(
         _ suggestion: SpeakerVoiceprintSuggestion,
@@ -242,6 +262,80 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
         viewModel.currentTranscription = rediarized
 
         XCTAssertTrue(viewModel.voiceSuggestions.isEmpty)
+    }
+
+    /// Confirming a suggestion renames through the same path as a manual
+    /// rename, so without suppression the app would immediately ask to
+    /// remember the voice it just matched — and past the pollution guard it
+    /// would claim another Sarah exists, contradicting the confirmation.
+    func testConfirmingASuggestionDoesNotAlsoOfferEnrollment() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(
+            candidate: observation(), suggestions: [suggestion()]
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+        try await waitUntil { !viewModel.voiceSuggestions.isEmpty }
+
+        viewModel.confirmVoiceSuggestion(try XCTUnwrap(viewModel.voiceSuggestions.first))
+
+        try await waitUntil { service.confirmed == ["S1"] }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNil(viewModel.pendingVoiceEnrollment)
+        XCTAssertNil(viewModel.voiceEnrollmentConflict)
+        XCTAssertTrue(service.candidateRequests.isEmpty)
+    }
+
+    /// Two recordings can hash alike — the fingerprint contains no
+    /// transcription — so the id has to be checked too.
+    func testSuggestionsAreNotRepublishedOntoAnotherTranscript() async throws {
+        let transcription = makeTranscription()
+        // The first recording's answer is parked, so the second selection lands
+        // before it returns.
+        let service = StubVoiceprintService(
+            candidate: observation(),
+            suggestions: [suggestion()],
+            heldForTranscription: transcription.id
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+
+        // A different recording carrying the same words and segments, so the
+        // fingerprint collides — it has no transcription in it. Built by
+        // sharing the segments, since their ids feed the hash and fresh ones
+        // would diverge.
+        var twin = makeTranscription()
+        twin.wordTimestamps = transcription.wordTimestamps
+        twin.transcriptSegments = transcription.transcriptSegments
+        twin.speakers = transcription.speakers
+        twin.diarizationSegments = transcription.diarizationSegments
+        XCTAssertNotEqual(twin.id, transcription.id)
+        XCTAssertEqual(
+            SpeakerAttributionResolver.resolve(transcription: twin).fingerprint,
+            SpeakerAttributionResolver.resolve(transcription: transcription).fingerprint
+        )
+        viewModel.currentTranscription = twin
+        try await waitUntil { viewModel.speakerAttribution != nil }
+
+        service.releaseHeldSuggestions()
+        try await Task.sleep(for: .milliseconds(80))
+
+        XCTAssertTrue(
+            viewModel.voiceSuggestions.isEmpty,
+            "an in-flight load for the previous recording must not republish here"
+        )
+    }
+
+    func testAFailedEnrollmentIsReportedAsAFailure() async throws {
+        struct Boom: Error {}
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(candidate: observation(), enrollError: Boom())
+        let viewModel = try await configured(transcription, voiceprints: service)
+        viewModel.renameSpeaker(id: "S1", to: "Sarah")
+        try await waitUntil { viewModel.pendingVoiceEnrollment != nil }
+
+        viewModel.confirmVoiceEnrollment()
+
+        try await waitUntil { viewModel.voiceEnrollmentMessage != nil }
+        XCTAssertEqual(viewModel.voiceEnrollmentMessage?.kind, .failure)
     }
 
     // MARK: Offering

@@ -3971,13 +3971,16 @@ struct TranscriptResultView: View {
         )
     }
 
-    private func voiceEnrollmentMessageBanner(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: DesignSystem.Spacing.sm) {
-            Image(systemName: "checkmark.circle")
+    private func voiceEnrollmentMessageBanner(
+        _ message: TranscriptionViewModel.VoiceProfileMessage
+    ) -> some View {
+        let failed = message.kind == .failure
+        return HStack(alignment: .top, spacing: DesignSystem.Spacing.sm) {
+            Image(systemName: failed ? "exclamationmark.circle" : "checkmark.circle")
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(DesignSystem.Colors.accent)
+                .foregroundStyle(failed ? DesignSystem.Colors.warningAmber : DesignSystem.Colors.accent)
 
-            Text(message)
+            Text(message.text)
                 .font(DesignSystem.Typography.bodySmall)
                 .foregroundStyle(DesignSystem.Colors.textSecondary)
 
@@ -3989,11 +3992,16 @@ struct TranscriptResultView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(DesignSystem.Colors.textSecondary)
+            .accessibilityLabel("Dismiss voice profile message")
         }
         .padding(DesignSystem.Spacing.md)
         .background(
             RoundedRectangle(cornerRadius: DesignSystem.Layout.rowCornerRadius)
-                .fill(DesignSystem.Colors.accentLight)
+                .fill(
+                    failed
+                        ? DesignSystem.Colors.warningAmber.opacity(0.1)
+                        : DesignSystem.Colors.accentLight
+                )
         )
     }
 
