@@ -10,6 +10,7 @@ private final class StubAdminService: SpeakerVoiceprintServicing, @unchecked Sen
     private var storedSamples: [UUID: [SpeakerProfileExemplar]]
     private let renameError: Error?
     private let refusesLastSample: Bool
+    private let forgetFailsFor: Set<UUID>
 
     private var storedForgotten: [UUID] = []
     private var storedSampleReads: [UUID] = []
@@ -32,12 +33,14 @@ private final class StubAdminService: SpeakerVoiceprintServicing, @unchecked Sen
         voices: [EnrolledVoice],
         samples: [UUID: [SpeakerProfileExemplar]] = [:],
         renameError: Error? = nil,
-        refusesLastSample: Bool = false
+        refusesLastSample: Bool = false,
+        forgetFailsFor: Set<UUID> = []
     ) {
         self.storedVoices = voices
         self.storedSamples = samples
         self.renameError = renameError
         self.refusesLastSample = refusesLastSample
+        self.forgetFailsFor = forgetFailsFor
     }
 
     func enrolledVoices() async throws -> [EnrolledVoice] {
@@ -81,7 +84,10 @@ private final class StubAdminService: SpeakerVoiceprintServicing, @unchecked Sen
         return true
     }
 
+    struct ForgetFailed: Error {}
+
     func forgetVoice(profileId: UUID) async throws {
+        if forgetFailsFor.contains(profileId) { throw ForgetFailed() }
         lock.lock()
         storedForgotten.append(profileId)
         storedVoices.removeAll { $0.id == profileId }
@@ -214,7 +220,9 @@ final class VoiceProfilesViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.voices.map(\.profile.displayName), ["Sarah Chen"])
     }
 
-    func testRenamingToABlankNameDoesNothing() async {
+    /// The rename sheet dismisses itself before this runs, so a silent refusal
+    /// would read as the rename having worked.
+    func testRenamingToABlankNameSaysWhyItWasRefused() async {
         let sarah = voice(named: "Sarah")
         let viewModel = VoiceProfilesViewModel(service: StubAdminService(voices: [sarah]))
         await viewModel.load()
@@ -222,7 +230,35 @@ final class VoiceProfilesViewModelTests: XCTestCase {
         await viewModel.rename(sarah.id, to: "   ")
 
         XCTAssertEqual(viewModel.voices.map(\.profile.displayName), ["Sarah"])
+        XCTAssertEqual(viewModel.errorMessage, "A voice needs a name.")
+    }
+
+    func testASuccessfulLoadClearsAStaleError() async {
+        let service = StubAdminService(voices: [voice(named: "Sarah")])
+        let viewModel = VoiceProfilesViewModel(service: service)
+        await viewModel.rename(UUID(), to: "  ")
+        XCTAssertNotNil(viewModel.errorMessage)
+
+        await viewModel.load()
+
         XCTAssertNil(viewModel.errorMessage)
+    }
+
+    /// One failure must not abandon the rest: on a deletion path for biometric
+    /// samples, a silent early abort leaves voices the user asked to delete.
+    func testBulkDeletionContinuesPastAFailure() async {
+        let sarah = voice(named: "Sarah")
+        let nadia = voice(named: "Nadia")
+        let service = StubAdminService(voices: [sarah, nadia], forgetFailsFor: [sarah.id])
+        let viewModel = VoiceProfilesViewModel(service: service)
+        await viewModel.load()
+        viewModel.selectedProfileIDs = [sarah.id, nadia.id]
+
+        await viewModel.forgetSelected()
+
+        XCTAssertEqual(service.forgotten, [nadia.id])
+        XCTAssertEqual(viewModel.voices.map(\.profile.displayName), ["Sarah"])
+        XCTAssertEqual(viewModel.errorMessage, "Could not forget 1 voice. The rest were removed.")
     }
 
     func testATakenNameIsReportedInPlainLanguage() async {

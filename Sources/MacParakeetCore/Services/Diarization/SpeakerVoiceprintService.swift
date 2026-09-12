@@ -575,8 +575,11 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
     /// the voice is the way to remove the last one.
     @discardableResult
     public func deleteSample(id: UUID, profileId: UUID) async throws -> Bool {
-        guard try profiles.exemplars(profileId: profileId).count > 1 else { return false }
-        return try profiles.deleteExemplar(id: id)
+        // The store checks ownership and the count in the same write. Doing it
+        // here would let two callers both see more than one sample and both
+        // delete, and would delete by id alone — taking another profile's last
+        // sample on a mismatched id.
+        try profiles.deleteExemplar(id: id, profileId: profileId, keepingAtLeastOne: true)
     }
 
     public func forgetVoice(profileId: UUID) async throws {

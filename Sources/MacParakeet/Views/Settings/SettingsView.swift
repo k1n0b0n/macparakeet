@@ -1289,11 +1289,16 @@ struct SettingsView: View {
                     isOn: $viewModel.meetingSpeakerDiarization
                 )
 
-                // Inside the revealed block on purpose: with speaker detection
-                // off there are no speakers to remember, and a voice store
-                // should not be advertised to someone who never asked for one.
-                if AppFeatures.isVoiceProfilesAvailable(), viewModel.meetingSpeakerDiarization {
-                    rememberSpeakersRow
+                if AppFeatures.isVoiceProfilesAvailable() {
+                    // The toggle is revealed by speaker detection — with it off
+                    // there are no speakers to remember. The management row is
+                    // not: voices stored earlier are still on disk, and the
+                    // only screen that can inspect or delete one of them must
+                    // not disappear with a switch that did not delete anything.
+                    if viewModel.meetingSpeakerDiarization {
+                        rememberSpeakersRow
+                    }
+                    voiceProfilesManagementRow
                 }
 
                 Divider()
@@ -1415,9 +1420,19 @@ struct SettingsView: View {
                 }
             }
 
-            // Shown whenever the feature is available, not only while the
-            // preference is on: turning it off must not hide the only surface
-            // that can delete what is already stored.
+        }
+        .sheet(isPresented: $viewModel.isRequestingVoiceprintConsent) {
+            VoiceProfileConsentSheet(viewModel: viewModel)
+        }
+    }
+
+    /// Outside every preference check. Voices stored before the user turned
+    /// anything off are still on disk, and this is the only screen that can
+    /// show or remove one of them.
+    private var voiceProfilesManagementRow: some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.sm) {
+            Divider()
+
             HStack(spacing: DesignSystem.Spacing.sm) {
                 rowText(
                     title: "Voice profiles",
@@ -1427,9 +1442,6 @@ struct SettingsView: View {
                 Button("Manage…") { showVoiceProfiles = true }
                     .parakeetAction(.secondary)
             }
-        }
-        .sheet(isPresented: $viewModel.isRequestingVoiceprintConsent) {
-            VoiceProfileConsentSheet(viewModel: viewModel)
         }
         .sheet(isPresented: $showVoiceProfiles) {
             VoiceProfilesSheet(viewModel: voiceProfilesViewModel)
@@ -2007,6 +2019,15 @@ struct SettingsView: View {
                     caption: "Removes saved rows. Your lifetime stats stay."
                 ) {
                     if let error = viewModel.storageCleanupError {
+                        Text(error)
+                            .font(DesignSystem.Typography.caption)
+                            .foregroundStyle(DesignSystem.Colors.errorRed)
+                    }
+
+                    // The voice-profile row below deletes through its own view
+                    // model, so its failures land in a different property and
+                    // would otherwise be invisible on this card.
+                    if let error = voiceProfilesViewModel.errorMessage {
                         Text(error)
                             .font(DesignSystem.Typography.caption)
                             .foregroundStyle(DesignSystem.Colors.errorRed)

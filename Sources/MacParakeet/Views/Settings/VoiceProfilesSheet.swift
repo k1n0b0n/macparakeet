@@ -12,6 +12,7 @@ struct VoiceProfilesSheet: View {
     @State private var renaming: Renaming?
     @State private var pendingForget: EnrolledVoice?
     @State private var pendingForgetAll = false
+    @State private var pendingForgetSelected = false
 
     private struct Renaming: Identifiable {
         let id: UUID
@@ -200,7 +201,7 @@ struct VoiceProfilesSheet: View {
                 HStack(spacing: DesignSystem.Spacing.sm) {
                     Text(sample.createdAt.formatted(date: .abbreviated, time: .shortened))
                         .font(DesignSystem.Typography.caption)
-                    Text(sample.captureDomain.rawValue)
+                    Text(sample.captureDomain.displayName)
                         .font(DesignSystem.Typography.micro)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -278,7 +279,7 @@ struct VoiceProfilesSheet: View {
             HStack {
                 if !viewModel.selectedProfileIDs.isEmpty {
                     Button("Forget \(viewModel.selectedProfileIDs.count) Selected") {
-                        Task { await viewModel.forgetSelected() }
+                        pendingForgetSelected = true
                     }
                     .parakeetAction(.destructive)
                     .controlSize(.small)
@@ -311,6 +312,17 @@ struct VoiceProfilesSheet: View {
         } message: { voice in
             Text(
                 "\(voice.profile.displayName)'s voice samples are deleted from this Mac. Names already applied to your transcripts stay as they are."
+            )
+        }
+        .alert("Forget the selected voices?", isPresented: $pendingForgetSelected) {
+            Button("Cancel", role: .cancel) { pendingForgetSelected = false }
+            Button("Forget", role: .destructive) {
+                pendingForgetSelected = false
+                Task { await viewModel.forgetSelected() }
+            }
+        } message: {
+            Text(
+                "\(viewModel.selectedProfileIDs.count) saved voices and their samples are deleted from this Mac. Names already applied to your transcripts stay as they are."
             )
         }
         .alert("Forget all voices?", isPresented: $pendingForgetAll) {
