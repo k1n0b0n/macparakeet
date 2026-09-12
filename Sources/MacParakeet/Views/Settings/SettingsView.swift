@@ -1289,17 +1289,19 @@ struct SettingsView: View {
                     isOn: $viewModel.meetingSpeakerDiarization
                 )
 
-                if AppFeatures.isVoiceProfilesAvailable() {
-                    // The toggle is revealed by speaker detection — with it off
-                    // there are no speakers to remember. The management row is
-                    // not: voices stored earlier are still on disk, and the
-                    // only screen that can inspect or delete one of them must
-                    // not disappear with a switch that did not delete anything.
-                    if viewModel.meetingSpeakerDiarization {
-                        rememberSpeakersRow
-                    }
-                    voiceProfilesManagementRow
+                // The toggle is gated twice over — the feature must be
+                // available, and speaker detection on, since without clusters
+                // there is nothing to remember.
+                if AppFeatures.isVoiceProfilesAvailable(), viewModel.meetingSpeakerDiarization {
+                    rememberSpeakersRow
                 }
+
+                // The management row is gated by neither. A build where the
+                // flag is off can still be sitting on voices enrolled while it
+                // was on — a DEBUG session with `--enable-voice-profiles`, then
+                // a normal launch — and biometric data with no way to delete it
+                // is the one outcome this feature must never produce.
+                voiceProfilesManagementRow
 
                 Divider()
 
@@ -2083,24 +2085,22 @@ struct SettingsView: View {
                     // In Reset & Cleanup as well as inside the feature block:
                     // this is where people look for "delete my data", and it
                     // has to be findable without knowing where voices come
-                    // from. Shown even with the feature off, since voices can
-                    // already be stored.
-                    if AppFeatures.isVoiceProfilesAvailable() {
-                        Divider()
+                    // from. Not gated on the feature flag either: a build with
+                    // it off can still hold voices enrolled while it was on.
+                    Divider()
 
-                        resetActionRow(
-                            title: "Voice profiles",
-                            detail: "Saved voices and any still waiting to be named. Names already applied to transcripts stay.",
-                            action: ResetDestructiveAction(
-                                buttonTitle: "Forget…",
-                                accessibilityLabel: "Forget all voice profiles",
-                                confirmationTitle: "Forget All Voices?",
-                                confirmationMessage: "This deletes every saved voice, its samples, and any voices still waiting to be named. Names already applied to your transcripts stay as they are. This cannot be undone.",
-                                confirmButtonLabel: "Forget All",
-                                perform: { Task { await voiceProfilesViewModel.forgetAll() } }
-                            )
+                    resetActionRow(
+                        title: "Voice profiles",
+                        detail: "Saved voices and any still waiting to be named. Names already applied to transcripts stay.",
+                        action: ResetDestructiveAction(
+                            buttonTitle: "Forget…",
+                            accessibilityLabel: "Forget all voice profiles",
+                            confirmationTitle: "Forget All Voices?",
+                            confirmationMessage: "This deletes every saved voice, its samples, and any voices still waiting to be named. Names already applied to your transcripts stay as they are. This cannot be undone.",
+                            confirmButtonLabel: "Forget All",
+                            perform: { Task { await voiceProfilesViewModel.forgetAll() } }
                         )
-                    }
+                    )
 
                     Divider()
 

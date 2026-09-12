@@ -555,7 +555,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await sharing.refresh() }
         }
         voiceProfilesViewModel.configure(
-            service: AppFeatures.isVoiceProfilesAvailable() ? env.speakerVoiceprintService : nil
+            // Always wired: the management screen must be able to delete
+            // voices that an earlier run stored, whatever this build allows.
+            service: env.speakerVoiceprintService
         )
         settingsViewModel.onAccessibilityGranted = { [weak self] in
             self?.handleAccessibilityGrant()
