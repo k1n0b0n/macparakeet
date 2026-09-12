@@ -194,25 +194,41 @@ private final class StubAttributionReader: SpeakerAttributionReading, @unchecked
     }
 }
 
+/// Applies renames to the snapshot it was built from, so a confirmed
+/// suggestion actually changes the published label — a stub that replayed a
+/// fixed attribution would let a broken rename path look correct.
 private final class StubCorrectionService: SpeakerCorrectionServicing, @unchecked Sendable {
     struct Rejected: Error {}
 
     let result: SpeakerCorrectionResult
     let failsApply: Bool
+    private let base: Transcription?
 
-    init(result: SpeakerCorrectionResult, failsApply: Bool = false) {
+    init(result: SpeakerCorrectionResult, failsApply: Bool = false, base: Transcription? = nil) {
         self.result = result
         self.failsApply = failsApply
+        self.base = base
     }
 
     func apply(
         transcriptionId _: UUID,
-        command _: SpeakerCorrectionCommand,
+        command: SpeakerCorrectionCommand,
         expectedFingerprint _: TranscriptFingerprint,
         expectedRevision _: Int
     ) async throws -> SpeakerCorrectionResult {
         if failsApply { throw Rejected() }
-        return result
+        guard case .rename(let speakerID, let label) = command, var renamed = base,
+              var speakers = renamed.speakers,
+              let index = speakers.firstIndex(where: { $0.id == speakerID })
+        else { return result }
+        speakers[index].label = label
+        renamed.speakers = speakers
+        return SpeakerCorrectionResult(
+            attribution: SpeakerAttributionResolver.resolve(transcription: renamed),
+            revision: result.revision + 1,
+            canUndo: true,
+            canRedo: false
+        )
     }
 
     func undo(
@@ -283,6 +299,29 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
 
         try await waitUntil { service.confirmed == ["S1"] }
         XCTAssertTrue(viewModel.voiceSuggestions.isEmpty)
+        // The point of confirming is the label; recording the answer without
+        // applying it would be the failure this ordering exists to prevent.
+        try await waitUntil {
+            viewModel.effectiveCurrentTranscription?.speakers?.first?.label == "Sarah"
+        }
+    }
+
+    /// The legacy branch handles transcripts the correction layer cannot own.
+    /// Returning without reporting would drop a suggestion the user accepted
+    /// and never record it.
+    func testConfirmingWorksOnTheLegacyRenamePath() async throws {
+        var transcription = makeTranscription()
+        // No word timestamps: the correction path is unavailable.
+        transcription.wordTimestamps = nil
+        let service = StubVoiceprintService(
+            candidate: observation(), suggestions: [suggestion()]
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+        try await waitUntil { !viewModel.voiceSuggestions.isEmpty }
+
+        viewModel.confirmVoiceSuggestion(try XCTUnwrap(viewModel.voiceSuggestions.first))
+
+        try await waitUntil { service.confirmed == ["S1"] }
     }
 
     func testDismissingASuggestionRecordsTheRefusalAndAppliesNoLabel() async throws {
@@ -683,7 +722,8 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
                 result: SpeakerCorrectionResult(
                     attribution: attribution, revision: 1, canUndo: true, canRedo: false
                 ),
-                failsApply: correctionFails
+                failsApply: correctionFails,
+                base: transcription
             ),
             speakerVoiceprints: voiceprints
         )

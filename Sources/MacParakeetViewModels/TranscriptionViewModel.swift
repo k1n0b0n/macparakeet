@@ -2494,11 +2494,24 @@ public final class TranscriptionViewModel {
                 }
             )
         }
+        // Legacy path, for transcripts the correction layer cannot own. Its
+        // no-ops still report: a caller waiting on the callback would otherwise
+        // hang, and `confirmVoiceSuggestion` would drop a suggestion it never
+        // recorded.
         guard var transcription = currentTranscription,
             var speakers = transcription.speakers
-        else { return true }
-        guard let index = speakers.firstIndex(where: { $0.id == speakerId }) else { return true }
-        guard !trimmed.isEmpty, speakers[index].label != trimmed else { return true }
+        else {
+            onCommitted?(true)
+            return true
+        }
+        guard let index = speakers.firstIndex(where: { $0.id == speakerId }) else {
+            onCommitted?(true)
+            return true
+        }
+        guard !trimmed.isEmpty, speakers[index].label != trimmed else {
+            onCommitted?(true)
+            return true
+        }
         let previousCurrentSpeakers = speakers
         let previousCurrentSegments = transcription.transcriptSegments
         let previousCurrentUpdatedAt = transcription.updatedAt
@@ -2521,7 +2534,10 @@ public final class TranscriptionViewModel {
             transcriptions[transcriptionIndex].transcriptSegments = transcription.transcriptSegments
             transcriptions[transcriptionIndex].updatedAt = transcription.updatedAt
         }
-        guard let transcriptionRepo else { return true }
+        guard let transcriptionRepo else {
+            onCommitted?(true)
+            return true
+        }
         let transcriptionID = transcription.id
         Task {
             [
@@ -2545,6 +2561,7 @@ public final class TranscriptionViewModel {
                     transcriptionID: transcriptionID,
                     generation: renameGeneration
                 )
+                await MainActor.run { onCommitted?(true) }
             } catch {
                 let errorType = TelemetryErrorClassifier.classify(error)
                 self?.handleSpeakerRenamePersistenceFailure(
@@ -2562,6 +2579,7 @@ public final class TranscriptionViewModel {
                     transcriptionID: transcriptionID,
                     generation: renameGeneration
                 )
+                await MainActor.run { onCommitted?(false) }
             }
         }
         return true
