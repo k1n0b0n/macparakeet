@@ -3227,9 +3227,31 @@ final class SettingsViewModelTests: XCTestCase {
                 forKey: UserDefaultsAppRuntimePreferences.voiceprintConsentAcknowledgedAtKey
             )
         )
-        // And the resolved gate follows, which is what the pipeline reads.
+    }
+
+    /// The resolved gate is what the pipeline reads, so it has to be exercised
+    /// with the feature actually available — otherwise the compiled flag
+    /// answers `false` first and the assertion proves nothing.
+    func testTheResolvedGateFollowsConsentWhenTheFeatureIsAvailable() {
+        let available = [AppFeatures.voiceProfilesDeveloperLaunchArgument]
+        testDefaults.set(true, forKey: UserDefaultsAppRuntimePreferences.meetingSpeakerDiarizationKey)
+        viewModel.requestRememberSpeakers(true)
+        viewModel.resolveVoiceprintConsent(accepted: true)
+
+        #if DEBUG
+        XCTAssertTrue(
+            UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
+                defaults: testDefaults, arguments: available
+            )
+        )
+        #endif
+
+        viewModel.withdrawVoiceprintConsent()
+
         XCTAssertFalse(
-            UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(defaults: testDefaults)
+            UserDefaultsAppRuntimePreferences.rememberSpeakersEnabled(
+                defaults: testDefaults, arguments: available
+            )
         )
     }
 

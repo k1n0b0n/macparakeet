@@ -1678,6 +1678,11 @@ private final class NameHidingStore: SpeakerProfileRepositoryProtocol, @unchecke
         try wrapped.insertExemplar(exemplar, maxPerProfile: maxPerProfile, evicting: evicting)
     }
     func deleteExemplar(id: UUID) throws -> Bool { try wrapped.deleteExemplar(id: id) }
+    func deleteExemplar(id: UUID, profileId: UUID, keepingAtLeastOne: Bool) throws -> Bool {
+        try wrapped.deleteExemplar(
+            id: id, profileId: profileId, keepingAtLeastOne: keepingAtLeastOne
+        )
+    }
     func confirmedLinkCount(profileId: UUID) throws -> Int {
         try wrapped.confirmedLinkCount(profileId: profileId)
     }

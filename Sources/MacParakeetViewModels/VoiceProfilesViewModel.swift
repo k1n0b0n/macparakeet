@@ -21,9 +21,16 @@ public final class VoiceProfilesViewModel {
     public var expandedProfileIDs: Set<UUID> = []
     public var selectedProfileIDs: Set<UUID> = []
 
-    private let service: SpeakerVoiceprintServicing?
+    private var service: SpeakerVoiceprintServicing?
 
     public init(service: SpeakerVoiceprintServicing? = nil) {
+        self.service = service
+    }
+
+    /// Set once the app environment exists. Capturing the service at
+    /// construction would freeze `nil` whenever this view model is built first,
+    /// leaving a screen that silently reads and deletes nothing.
+    public func configure(service: SpeakerVoiceprintServicing?) {
         self.service = service
     }
 
@@ -35,6 +42,9 @@ public final class VoiceProfilesViewModel {
         defer { isLoading = false }
         do {
             voices = try await service.enrolledVoices()
+            // A successful read clears the last failure: leaving it would show
+            // current data beside an error that no longer applies.
+            errorMessage = nil
             // Drop expansion and selection for rows that no longer exist, so a
             // deletion elsewhere cannot leave a stale id selected.
             let live = Set(voices.map(\.id))
@@ -67,7 +77,12 @@ public final class VoiceProfilesViewModel {
     public func rename(_ profileId: UUID, to displayName: String) async {
         guard let service else { return }
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
+        // The rename sheet has already dismissed itself, so a silent return
+        // would read as the rename having worked.
+        guard !name.isEmpty else {
+            errorMessage = "A voice needs a name."
+            return
+        }
         do {
             try await service.renameProfile(id: profileId, to: name)
             await load()
@@ -106,19 +121,24 @@ public final class VoiceProfilesViewModel {
         }
     }
 
+    /// Each voice is deleted on its own. One failure must not abandon the rest:
+    /// on a deletion path for biometric samples, a silent early abort leaves
+    /// voices stored that the user asked to delete.
     public func forgetSelected() async {
         guard let service else { return }
-        do {
-            for profileId in selectedProfileIDs {
+        var failed = 0
+        for profileId in selectedProfileIDs {
+            do {
                 try await service.forgetVoice(profileId: profileId)
+            } catch {
+                failed += 1
             }
-            selectedProfileIDs.removeAll()
-            await load()
-        } catch {
-            // Some may already be gone; reload so the list shows what is true
-            // rather than what was attempted.
-            errorMessage = "Could not forget every selected voice."
-            await load()
+        }
+        selectedProfileIDs.removeAll()
+        await load()
+        if failed > 0 {
+            let noun = failed == 1 ? "voice" : "voices"
+            errorMessage = "Could not forget \(failed) \(noun). The rest were removed."
         }
     }
 
