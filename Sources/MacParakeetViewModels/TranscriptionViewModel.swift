@@ -2231,6 +2231,13 @@ public final class TranscriptionViewModel {
             offersEnrollment: false
         ) { [weak self] committed in
             guard committed else {
+                // The callback lands after the write, by which time the
+                // selection can have moved. `currentTranscription.didSet`
+                // clears the list at the moment of the change but cannot clear
+                // a later append, and these offers name positional speakers.
+                guard self?.currentTranscription?.id == transcriptionId,
+                      self?.speakerAttribution?.fingerprint == fingerprint
+                else { return }
                 self?.voiceSuggestions.append(suggestion)
                 return
             }

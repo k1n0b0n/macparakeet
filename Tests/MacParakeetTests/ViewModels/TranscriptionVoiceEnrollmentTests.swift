@@ -28,7 +28,11 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
     private let mergeEnrollment: SpeakerProfileEnrollment?
     private let suggestions: [SpeakerVoiceprintSuggestion]
     private let heldForTranscription: UUID?
-    private let release = DispatchSemaphore(value: 0)
+    /// Suspends instead of blocking: `DispatchSemaphore.wait` would occupy a
+    /// cooperative executor thread, and the attribution work this test waits
+    /// for runs on that same pool.
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var released = false
 
     private var storedConfirmed: [String] = []
     private var storedDismissed: [String] = []
@@ -113,14 +117,39 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         let held = heldForTranscription == transcriptionId
         lock.unlock()
         if held {
-            release.wait()
+            await waitForRelease()
             return suggestions
         }
         return heldForTranscription == nil ? suggestions : []
     }
 
+    /// Records the release when it arrives first, so either ordering is safe.
     func releaseHeldSuggestions() {
-        release.signal()
+        lock.lock()
+        let waiting = releaseContinuation
+        releaseContinuation = nil
+        released = true
+        lock.unlock()
+        waiting?.resume()
+    }
+
+    private func waitForRelease() async {
+        lock.lock()
+        if released {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if released {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            releaseContinuation = continuation
+            lock.unlock()
+        }
     }
 
     func dismiss(
