@@ -111,10 +111,14 @@ private final class StubAttributionReader: SpeakerAttributionReading, @unchecked
 }
 
 private final class StubCorrectionService: SpeakerCorrectionServicing, @unchecked Sendable {
-    let result: SpeakerCorrectionResult
+    struct Rejected: Error {}
 
-    init(result: SpeakerCorrectionResult) {
+    let result: SpeakerCorrectionResult
+    let failsApply: Bool
+
+    init(result: SpeakerCorrectionResult, failsApply: Bool = false) {
         self.result = result
+        self.failsApply = failsApply
     }
 
     func apply(
@@ -122,7 +126,10 @@ private final class StubCorrectionService: SpeakerCorrectionServicing, @unchecke
         command _: SpeakerCorrectionCommand,
         expectedFingerprint _: TranscriptFingerprint,
         expectedRevision _: Int
-    ) async throws -> SpeakerCorrectionResult { result }
+    ) async throws -> SpeakerCorrectionResult {
+        if failsApply { throw Rejected() }
+        return result
+    }
 
     func undo(
         transcriptionId _: UUID,
@@ -145,6 +152,51 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
     )
 
     // MARK: Offering
+
+    /// A speaker is renamed once, so after a relaunch there is no second rename
+    /// to trigger the offer — and the retained voice would expire unused.
+    func testOpeningATranscriptReoffersEnrollmentForANamedSpeaker() async throws {
+        var transcription = makeTranscription()
+        transcription.speakers = [SpeakerInfo(id: "S1", label: "Sarah")]
+        let service = StubVoiceprintService(candidate: observation())
+
+        let viewModel = try await configured(transcription, voiceprints: service)
+
+        try await waitUntil { viewModel.pendingVoiceEnrollment != nil }
+        XCTAssertEqual(viewModel.pendingVoiceEnrollment?.displayName, "Sarah")
+        XCTAssertTrue(service.enrollments.isEmpty, "offering must store nothing")
+    }
+
+    /// A speaker still carrying its generated label was never named, so there
+    /// is nothing to remember it as.
+    func testOpeningATranscriptDoesNotReofferForUnnamedSpeakers() async throws {
+        let transcription = makeTranscription()
+        XCTAssertEqual(transcription.speakers?.first?.label, "Others 1")
+        let service = StubVoiceprintService(candidate: observation())
+
+        let viewModel = try await configured(transcription, voiceprints: service)
+
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertNil(viewModel.pendingVoiceEnrollment)
+        XCTAssertTrue(service.candidateRequests.isEmpty)
+    }
+
+    /// `renameSpeaker` returns as soon as the write is scheduled, and that
+    /// write can still be refused. Offering then would let the user store a
+    /// voice under a name the transcript never kept.
+    func testARefusedRenameOffersNothing() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(candidate: observation())
+        let viewModel = try await configured(
+            transcription, voiceprints: service, correctionFails: true
+        )
+
+        viewModel.renameSpeaker(id: "S1", to: "Sarah")
+
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertNil(viewModel.pendingVoiceEnrollment)
+        XCTAssertTrue(service.candidateRequests.isEmpty)
+    }
 
     func testRenamingASpeakerOffersToRememberTheVoice() async throws {
         let transcription = makeTranscription()
@@ -198,8 +250,10 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
         viewModel.renameSpeaker(id: "S1", to: "Sarah")
         viewModel.currentTranscription = makeTranscription()
 
-        try await waitUntil { service.candidateRequests.count == 1 }
-        try await Task.sleep(for: .milliseconds(50))
+        // The offer now waits for the label to commit, so moving away first
+        // means it is never published rather than published and discarded —
+        // either way, no prompt lands on the wrong transcript.
+        try await Task.sleep(for: .milliseconds(120))
         XCTAssertNil(viewModel.pendingVoiceEnrollment)
     }
 
@@ -348,7 +402,8 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
 
     private func configured(
         _ transcription: Transcription,
-        voiceprints: SpeakerVoiceprintServicing?
+        voiceprints: SpeakerVoiceprintServicing?,
+        correctionFails: Bool = false
     ) async throws -> TranscriptionViewModel {
         let attribution = SpeakerAttributionResolver.resolve(transcription: transcription)
         let viewModel = TranscriptionViewModel()
@@ -359,7 +414,8 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
             speakerCorrectionService: StubCorrectionService(
                 result: SpeakerCorrectionResult(
                     attribution: attribution, revision: 1, canUndo: true, canRedo: false
-                )
+                ),
+                failsApply: correctionFails
             ),
             speakerVoiceprints: voiceprints
         )
