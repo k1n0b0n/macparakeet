@@ -1898,15 +1898,18 @@ struct TranscriptResultView: View {
                         meetingNoWordTimestampsBanner(banner)
                     }
 
-                    if let conflict = viewModel.voiceEnrollmentConflict {
-                        voiceEnrollmentConflictBanner(conflict)
-                    } else if let offer = viewModel.pendingVoiceEnrollment {
-                        voiceEnrollmentOfferBanner(offer)
-                    }
+                    Group {
+                        if let conflict = viewModel.voiceEnrollmentConflict {
+                            voiceEnrollmentConflictBanner(conflict)
+                        } else if let offer = viewModel.pendingVoiceEnrollment {
+                            voiceEnrollmentOfferBanner(offer)
+                        }
 
-                    if let message = viewModel.voiceEnrollmentMessage {
-                        voiceEnrollmentMessageBanner(message)
+                        if let message = viewModel.voiceEnrollmentMessage {
+                            voiceEnrollmentMessageBanner(message)
+                        }
                     }
+                    .id(Self.voiceProfileBannerAnchor)
 
                     if shouldShowTranscriptAISetupBanner {
                         chatConfigurationBanner
@@ -1988,6 +1991,17 @@ struct TranscriptResultView: View {
                     withAnimation(.easeInOut(duration: 0.25)) {
                         proxy.scrollTo(target, anchor: .center)
                     }
+                }
+            }
+            // The banner sits at the top of the transcript while the speaker
+            // that was just renamed can be anywhere in it, so on a long
+            // recording the offer appears entirely off screen and the feature
+            // looks like it did nothing. Moving the view is acceptable here
+            // because it answers a gesture the user just made.
+            .onChange(of: viewModel.pendingVoiceEnrollment?.speakerId) { _, speakerId in
+                guard speakerId != nil else { return }
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    proxy.scrollTo(Self.voiceProfileBannerAnchor, anchor: .top)
                 }
             }
             }
@@ -3831,6 +3845,9 @@ struct TranscriptResultView: View {
     /// Offers to remember the voice just named. Non-modal on purpose: the user
     /// came here to fix a label, and declining has to cost nothing more than
     /// ignoring it.
+    /// Scroll anchor for the voice-profile banners.
+    private static let voiceProfileBannerAnchor = "voice-profile-banners"
+
     private func voiceEnrollmentOfferBanner(
         _ offer: TranscriptionViewModel.PendingVoiceEnrollment
     ) -> some View {
