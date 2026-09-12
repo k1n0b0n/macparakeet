@@ -53,7 +53,7 @@ struct VoiceProfileConsentSheet: View {
             )
             point(
                 "hand.raised",
-                "A voice sample is biometric data. In Illinois, Texas and under the EU GDPR, keeping one needs that person's permission."
+                "A voice sample is biometric data, and laws such as BIPA, CUBI and the GDPR regulate keeping one. What they require differs, and the responsibility is yours as the person recording."
             )
             point(
                 "lock.laptopcomputer",
