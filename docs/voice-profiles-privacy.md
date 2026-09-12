@@ -35,12 +35,18 @@ Waiting voices are never compared with each other. MacParakeet cannot tell you
 
 ## Why you are asked for permission
 
-A voice sample is biometric data. Illinois (BIPA), Texas (CUBI) and the EU GDPR
-(Article 9) all treat it that way, and all of them require the consent of the
-person it describes — not just yours.
+A voice sample is biometric data, and several laws regulate keeping one —
+Illinois's BIPA, Texas's CUBI, and the GDPR where it applies. What each of them
+requires differs: BIPA centres on written notice and a signed release before
+collection, while the GDPR treats biometric data used to identify someone as a
+special category needing an explicit lawful basis. The duties fall on whoever
+records the meeting, which is you rather than MacParakeet — it stores nothing on
+its own and nothing leaves your Mac.
 
-That is why turning "Remember speakers" on asks you to confirm you have the
-participants' permission, before anything is stored. Declining stores nothing.
+We are not able to tell you which rules apply to your situation, and this is not
+legal advice. What MacParakeet does is make the choice explicit and reversible:
+turning "Remember speakers" on asks you to confirm you have the participants'
+permission, before anything is stored. Declining stores nothing.
 You can withdraw it at any time, which switches the feature off; your existing
 saved voices stay until you delete them, and the screen that deletes them
 remains available.

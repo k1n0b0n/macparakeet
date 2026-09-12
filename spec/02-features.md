@@ -1517,8 +1517,10 @@ another, which is what keeps recurring-unknown detection (the literal ask in
 
 - Vectors stay on this Mac. No table involved appears in any export, diagnostic
   bundle, or the CLI — asserted per table across every outward surface
-- A voice sample is biometric data. Illinois BIPA, Texas CUBI and GDPR Art. 9
-  treat it as such, so the consent sheet is a gate, not a notice
+- A voice sample is biometric data regulated by BIPA, CUBI and the GDPR, whose
+  requirements differ and whose duties fall on whoever records the meeting. The
+  app cannot resolve that, so the consent sheet is a gate rather than advice:
+  the user states they have permission, and nothing is stored until they do
 - Withdrawing consent turns the preference off; the management screen stays
   reachable, since a switch that deleted nothing must not hide the deletion path
 - Forgetting a voice never changes names already written to transcripts
