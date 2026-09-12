@@ -181,6 +181,30 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
         XCTAssertTrue(service.candidateRequests.isEmpty)
     }
 
+    /// The commit callback can land after the user moved on. Reading the
+    /// current transcript there would offer the *new* transcript's positional
+    /// speaker under the name typed on the old one.
+    func testAnOfferIsNotMadeAgainstATranscriptTheUserMovedTo() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(candidate: observation())
+        let viewModel = try await configured(transcription, voiceprints: service)
+
+        viewModel.renameSpeaker(id: "S1", to: "Sarah")
+        // Same words and segments, so the fingerprint matches too: only the
+        // captured transcription id can tell these apart.
+        var twin = makeTranscription()
+        twin.wordTimestamps = transcription.wordTimestamps
+        twin.transcriptSegments = transcription.transcriptSegments
+        twin.speakers = transcription.speakers
+        twin.diarizationSegments = transcription.diarizationSegments
+        viewModel.currentTranscription = twin
+        try await waitUntil { viewModel.speakerAttribution != nil }
+
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertNil(viewModel.pendingVoiceEnrollment)
+        XCTAssertTrue(service.candidateRequests.isEmpty)
+    }
+
     /// `renameSpeaker` returns as soon as the write is scheduled, and that
     /// write can still be refused. Offering then would let the user store a
     /// voice under a name the transcript never kept.
