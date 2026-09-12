@@ -1155,6 +1155,46 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         XCTAssertNotNil(voice.lastEvaluatedDistance)
     }
 
+    /// The matcher tightens by the cross-aggregation penalty when the winning
+    /// reference came from another clustering configuration. Reporting `tau`
+    /// regardless would show a distance as acceptable that the matcher rejects
+    /// — on the one screen whose job is explaining why nothing matches.
+    func testAVoiceWithRetunedSamplesReportsTheTightenedThreshold() async throws {
+        let recording = try savedTranscription()
+        _ = try await enrolledSarah(transcriptionId: recording.id)
+
+        let retuned = SpeakerVoiceprintService(
+            profiles: profiles,
+            candidates: candidates,
+            journal: journal,
+            policy: .v1,
+            identity: SpeakerModelIdentity(
+                embeddingModelId: identity.embeddingModelId,
+                aggregationProfileId: "retuned-aggregation"
+            ),
+            isEnabled: { true }
+        )
+
+        let listed = try await retuned.enrolledVoices()
+        let voice = try XCTUnwrap(listed.first)
+        XCTAssertEqual(
+            voice.acceptanceThreshold,
+            SpeakerMatchPolicy.v1.tau - SpeakerMatchPolicy.v1.crossAggregationPenalty,
+            accuracy: 1e-9
+        )
+        // Still comparable — only the model half makes samples unscoreable.
+        XCTAssertFalse(voice.usesRetiredModel)
+    }
+
+    func testAVoiceWithCurrentSamplesReportsTau() async throws {
+        let recording = try savedTranscription()
+        _ = try await enrolledSarah(transcriptionId: recording.id)
+
+        let listed = try await makeService().enrolledVoices()
+        let voice = try XCTUnwrap(listed.first)
+        XCTAssertEqual(voice.acceptanceThreshold, SpeakerMatchPolicy.v1.tau, accuracy: 1e-9)
+    }
+
     func testAVoiceFromAnotherModelIsFlaggedAsRetired() async throws {
         let recording = try savedTranscription()
         _ = try await enrolledSarah(transcriptionId: recording.id)
@@ -1164,7 +1204,10 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             candidates: candidates,
             journal: journal,
             policy: .v1,
-            embeddingModelId: "some-newer-model",
+            identity: SpeakerModelIdentity(
+                embeddingModelId: "some-newer-model",
+                aggregationProfileId: identity.aggregationProfileId
+            ),
             isEnabled: { true }
         )
 
@@ -1571,7 +1614,7 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
             candidates: candidates,
             journal: journal,
             policy: .v1,
-            embeddingModelId: identity.embeddingModelId,
+            identity: identity,
             candidateRetention: retention,
             isEnabled: { enabled },
             now: { now ?? Date() }

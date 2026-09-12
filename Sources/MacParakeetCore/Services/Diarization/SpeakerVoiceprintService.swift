@@ -155,10 +155,10 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
     private let journal: SpeakerMatchJournalRepositoryProtocol
     private let policy: SpeakerMatchPolicy
     private let candidateRetention: TimeInterval
-    /// The model the pipeline produces today. Samples from another one can
-    /// never score, so administration says so instead of showing a profile
-    /// that looks healthy.
-    private let embeddingModelId: String
+    /// The representation the pipeline produces today. The model half decides
+    /// whether samples can score at all; the aggregation half decides which
+    /// threshold they are judged against.
+    private let identity: SpeakerModelIdentity
     /// Read per call, so turning the preference off takes effect immediately.
     private let isEnabled: @Sendable () -> Bool
     private let now: @Sendable () -> Date
@@ -168,7 +168,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         candidates: SpeakerEmbeddingCandidateRepositoryProtocol,
         journal: SpeakerMatchJournalRepositoryProtocol,
         policy: SpeakerMatchPolicy = .v1,
-        embeddingModelId: String = DiarizationService.embeddingModelId,
+        identity: SpeakerModelIdentity = DiarizationService.defaultModelIdentity,
         candidateRetention: TimeInterval = SpeakerEmbeddingCandidateRepository.defaultRetention,
         isEnabled: @escaping @Sendable () -> Bool,
         now: @escaping @Sendable () -> Date = { Date() }
@@ -177,7 +177,7 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         self.candidates = candidates
         self.journal = journal
         self.policy = policy
-        self.embeddingModelId = embeddingModelId
+        self.identity = identity
         self.candidateRetention = candidateRetention
         self.isEnabled = isEnabled
         self.now = now
@@ -538,19 +538,34 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         let stored = try profiles.profiles()
         guard !stored.isEmpty else { return [] }
         let samples = try profiles.exemplarsByProfile()
-        let currentModel = embeddingModelId
 
         return stored.map { profile in
-            EnrolledVoice(
+            let references = samples[profile.id] ?? []
+            return EnrolledVoice(
                 profile: profile,
-                sampleCount: samples[profile.id]?.count ?? 0,
+                sampleCount: references.count,
                 maxSamples: policy.maxReferencesPerProfile,
                 recognizedCount: (try? profiles.confirmedLinkCount(profileId: profile.id)) ?? 0,
-                usesRetiredModel: profile.embeddingModelId != currentModel,
+                usesRetiredModel: profile.embeddingModelId != identity.embeddingModelId,
                 lastEvaluatedDistance: profile.lastEvaluatedDistance,
-                acceptanceThreshold: policy.tau
+                acceptanceThreshold: acceptanceThreshold(for: references)
             )
         }
+    }
+
+    /// The threshold this profile's samples can actually be judged against.
+    ///
+    /// The matcher tightens by `crossAggregationPenalty` when the winning
+    /// reference came from another clustering configuration, so reporting
+    /// `tau` unconditionally would show a distance as acceptable that the
+    /// matcher rejects. Where samples are mixed the stricter figure is shown:
+    /// a screen that explains why nothing matches must not overstate what will.
+    private func acceptanceThreshold(for references: [SpeakerProfileExemplar]) -> Double {
+        guard !references.isEmpty else { return policy.tau }
+        let allCurrent = references.allSatisfy {
+            $0.aggregationProfileId == identity.aggregationProfileId
+        }
+        return allCurrent ? policy.tau : policy.tau - policy.crossAggregationPenalty
     }
 
     public func samples(profileId: UUID) async throws -> [SpeakerProfileExemplar] {

@@ -1443,7 +1443,11 @@ struct SettingsView: View {
                     .parakeetAction(.secondary)
             }
         }
-        .sheet(isPresented: $showVoiceProfiles) {
+        // Cleared on dismissal: the view model is shared with the Reset &
+        // Cleanup card, so a rename failure raised inside the sheet would
+        // otherwise reappear under "Delete data", attributed to a destructive
+        // action the user never took.
+        .sheet(isPresented: $showVoiceProfiles, onDismiss: { voiceProfilesViewModel.clearError() }) {
             VoiceProfilesSheet(viewModel: voiceProfilesViewModel)
         }
     }
