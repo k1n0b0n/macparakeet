@@ -1978,6 +1978,11 @@ public final class TranscriptionViewModel {
                 self.speakerCorrectionsApplied = projection.correctionsApplied
                 self.canUndoSpeakerCorrection = projection.canUndo
                 self.canRedoSpeakerCorrection = projection.canRedo
+                // The fingerprint is only known now, and a name applied in an
+                // earlier session left no offer behind.
+                if let current = self.currentTranscription, current.id == transcriptionID {
+                    self.reofferVoiceEnrollment(for: current)
+                }
                 return true
             } catch {
                 guard let self,
@@ -1996,8 +2001,15 @@ public final class TranscriptionViewModel {
     /// Returns `false` when the correction was refused because speaker changes
     /// are still loading or saving, so the caller can keep its pending input
     /// and retry once `isApplyingSpeakerCorrection` clears.
+    ///
+    /// `onCommitted` reports what the scheduled write actually did. The `Bool`
+    /// this returns only says the command was accepted for writing; callers
+    /// whose own work depends on the label landing must wait for the callback.
     @discardableResult
-    public func applySpeakerCorrection(_ command: SpeakerCorrectionCommand) -> Bool {
+    public func applySpeakerCorrection(
+        _ command: SpeakerCorrectionCommand,
+        onCommitted: (@MainActor @Sendable (Bool) -> Void)? = nil
+    ) -> Bool {
         guard let transcriptionID = currentTranscription?.id,
               let speakerCorrectionService
         else { return true }
@@ -2018,8 +2030,10 @@ public final class TranscriptionViewModel {
                 self?.publishSpeakerCorrectionResult(
                     result, transcriptionID: transcriptionID, selectedRevision: selectedRevision
                 )
+                await MainActor.run { onCommitted?(true) }
             } catch {
                 self?.handleSpeakerCorrectionFailure(error, transcriptionID: transcriptionID)
+                await MainActor.run { onCommitted?(false) }
             }
         }
         return true
@@ -2147,6 +2161,58 @@ public final class TranscriptionViewModel {
         voiceEnrollmentMessage = nil
     }
 
+    /// Re-offers enrollment when a transcript opens.
+    ///
+    /// Without this the flywheel depends on the user staying in the window that
+    /// follows a rename: a speaker is renamed once, so after a relaunch there
+    /// is no second rename to trigger the offer, and the retained voice expires
+    /// unused. Only speakers the user has actually named are considered, and
+    /// only while a candidate is still available — the same conditions the
+    /// rename path applies.
+    func reofferVoiceEnrollment(for transcription: Transcription) {
+        guard let speakerVoiceprints,
+              pendingVoiceEnrollment == nil,
+              voiceEnrollmentConflict == nil,
+              let fingerprint = speakerAttribution?.fingerprint,
+              let speakers = effectiveCurrentTranscription?.speakers ?? transcription.speakers
+        else { return }
+
+        // A speaker still carrying its positional label was never named, so
+        // there is nothing to remember it as.
+        let named = speakers.filter { !$0.carriesAutomaticLabel }
+        guard !named.isEmpty else { return }
+        let transcriptionId = transcription.id
+
+        Task { [weak self] in
+            for speaker in named {
+                let observation = try? await speakerVoiceprints.enrollmentCandidate(
+                    transcriptionId: transcriptionId,
+                    speakerId: speaker.id,
+                    fingerprint: fingerprint
+                )
+                guard let observation else { continue }
+                let published = await MainActor.run { [weak self] () -> Bool in
+                    guard let self,
+                          currentTranscription?.id == transcriptionId,
+                          speakerAttribution?.fingerprint == fingerprint,
+                          pendingVoiceEnrollment == nil
+                    else { return false }
+                    pendingVoiceEnrollment = PendingVoiceEnrollment(
+                        speakerId: speaker.id,
+                        displayName: speaker.label,
+                        transcriptionId: transcriptionId,
+                        fingerprint: fingerprint,
+                        observation: observation
+                    )
+                    return true
+                }
+                // One at a time: several banners at once would be a queue to
+                // clear rather than a question to answer.
+                if published { return }
+            }
+        }
+    }
+
     /// Offers to remember the voice, but only once the store confirms a
     /// candidate still exists for this speaker — otherwise the prompt would
     /// promise something enrollment would then refuse. Silent when the feature
@@ -2165,7 +2231,11 @@ public final class TranscriptionViewModel {
             )
             guard let observation else { return }
             await MainActor.run {
-                guard self?.currentTranscription?.id == transcriptionId else { return }
+                // Both: a same-row re-diarization keeps the id and changes the
+                // fingerprint, and this offer names a positional speaker.
+                guard self?.currentTranscription?.id == transcriptionId,
+                      self?.speakerAttribution?.fingerprint == fingerprint
+                else { return }
                 self?.pendingVoiceEnrollment = PendingVoiceEnrollment(
                     speakerId: speakerId,
                     displayName: displayName,
@@ -2215,7 +2285,14 @@ public final class TranscriptionViewModel {
         }
     }
 
+    /// The write already happened; this only decides whether to say so here.
+    /// After navigation or a re-diarization the answer belongs to a transcript
+    /// the user is no longer looking at, and a conflict banner shown there
+    /// would name a speaker that no longer exists.
     private func publish(_ outcome: SpeakerProfileEnrollment, for offer: PendingVoiceEnrollment) {
+        guard currentTranscription?.id == offer.transcriptionId,
+              speakerAttribution?.fingerprint == offer.fingerprint
+        else { return }
         switch outcome {
         case .created, .addedExemplar:
             voiceEnrollmentMessage = "\(offer.displayName)'s voice will be suggested in later meetings."
@@ -2251,14 +2328,16 @@ public final class TranscriptionViewModel {
                 return false
             }
             clearError()
-            guard applySpeakerCorrection(.rename(speakerID: speakerId, label: trimmed)) else {
-                return false
+            // Offered only once the label is committed. `applySpeakerCorrection`
+            // returns as soon as the write is scheduled, and that write can
+            // still be refused for a stale revision — an offer accepted after
+            // that would store a voice under a name the transcript never kept.
+            return applySpeakerCorrection(
+                .rename(speakerID: speakerId, label: trimmed)
+            ) { [weak self] committed in
+                guard committed else { return }
+                self?.offerVoiceEnrollment(speakerId: speakerId, displayName: trimmed)
             }
-            // Offered alongside the label write, not after it: the two are
-            // independent stores, and the offer only appears once the voice
-            // store confirms it can still act on it.
-            offerVoiceEnrollment(speakerId: speakerId, displayName: trimmed)
-            return true
         }
         guard var transcription = currentTranscription,
             var speakers = transcription.speakers
