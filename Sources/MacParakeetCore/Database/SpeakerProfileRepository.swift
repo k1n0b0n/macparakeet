@@ -69,6 +69,8 @@ public protocol SpeakerProfileRepositoryProtocol: Sendable {
         evicting: SpeakerProfileExemplar.Origin
     ) throws -> SpeakerExemplarInsertion
     func deleteExemplar(id: UUID) throws -> Bool
+    /// Ownership, the last-sample rule and the delete in one write.
+    func deleteExemplar(id: UUID, profileId: UUID, keepingAtLeastOne: Bool) throws -> Bool
     /// Rows from an earlier fingerprint are deliberately invisible here.
     func links(transcriptionId: UUID, fingerprint: String) throws -> [SpeakerProfileLink]
     func save(_ link: SpeakerProfileLink) throws
@@ -320,6 +322,22 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
         ).insert(db)
     }
 
+    /// Ownership, the last-sample rule and the delete in one write.
+    ///
+    /// Checking the count outside cannot hold the rule — two callers both see
+    /// more than one and both delete — and deleting by id alone would let a
+    /// mismatched id take another profile's final sample.
+    public func deleteExemplar(id: UUID, profileId: UUID, keepingAtLeastOne: Bool) throws -> Bool {
+        try dbQueue.write { db in
+            let owned = try SpeakerProfileExemplar
+                .filter(Column("profileId") == profileId)
+                .fetchAll(db)
+            guard owned.contains(where: { $0.id == id }) else { return false }
+            if keepingAtLeastOne, owned.count <= 1 { return false }
+            return try SpeakerProfileExemplar.deleteOne(db, key: id)
+        }
+    }
+
     public func deleteExemplar(id: UUID) throws -> Bool {
         try dbQueue.write { db in
             try SpeakerProfileExemplar.deleteOne(db, key: id)
@@ -417,12 +435,19 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
 
     /// Exemplars and links go with it through their cascades; transcripts and
     /// any label already applied are untouched.
+    /// Distinct recordings, not rows: links are fingerprint-scoped, so one
+    /// transcription re-diarized and re-confirmed holds several rows for the
+    /// same profile and would inflate "recognized in N recordings".
     public func confirmedLinkCount(profileId: UUID) throws -> Int {
         try dbQueue.read { db in
-            try SpeakerProfileLink
-                .filter(Column("profileId") == profileId)
-                .filter(Column("status") == SpeakerProfileLink.Status.confirmed.rawValue)
-                .fetchCount(db)
+            try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(DISTINCT transcriptionId) FROM speaker_profile_links
+                    WHERE profileId = ? AND status = ?
+                    """,
+                arguments: [profileId, SpeakerProfileLink.Status.confirmed.rawValue]
+            ) ?? 0
         }
     }
 
