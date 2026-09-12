@@ -2217,10 +2217,19 @@ public final class TranscriptionViewModel {
     /// candidate still exists for this speaker — otherwise the prompt would
     /// promise something enrollment would then refuse. Silent when the feature
     /// is off, the window has lapsed, or the speaker spoke too briefly.
-    private func offerVoiceEnrollment(speakerId: String, displayName: String) {
+    /// `transcriptionId` and `fingerprint` are the ones the rename was made
+    /// against, passed in rather than read here: the caller may be a callback
+    /// that lands after the user moved on, and reading the current values
+    /// would offer the new transcript.s positional speaker under the old name.
+    private func offerVoiceEnrollment(
+        speakerId: String,
+        displayName: String,
+        transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint
+    ) {
         guard let speakerVoiceprints,
-              let transcriptionId = currentTranscription?.id,
-              let fingerprint = speakerAttribution?.fingerprint
+              currentTranscription?.id == transcriptionId,
+              speakerAttribution?.fingerprint == fingerprint
         else { return }
 
         Task { [weak self] in
@@ -2328,6 +2337,12 @@ public final class TranscriptionViewModel {
                 return false
             }
             clearError()
+            // Captured before the write is scheduled, because the callback can
+            // land after the user has moved on: the offer must belong to the
+            // transcript that was renamed, not to whichever one is open when
+            // the write finishes.
+            let renamedTranscriptionId = currentTranscription?.id
+            let renamedFingerprint = speakerAttribution?.fingerprint
             // Offered only once the label is committed. `applySpeakerCorrection`
             // returns as soon as the write is scheduled, and that write can
             // still be refused for a stale revision — an offer accepted after
@@ -2335,8 +2350,16 @@ public final class TranscriptionViewModel {
             return applySpeakerCorrection(
                 .rename(speakerID: speakerId, label: trimmed)
             ) { [weak self] committed in
-                guard committed else { return }
-                self?.offerVoiceEnrollment(speakerId: speakerId, displayName: trimmed)
+                guard committed,
+                      let renamedTranscriptionId,
+                      let renamedFingerprint
+                else { return }
+                self?.offerVoiceEnrollment(
+                    speakerId: speakerId,
+                    displayName: trimmed,
+                    transcriptionId: renamedTranscriptionId,
+                    fingerprint: renamedFingerprint
+                )
             }
         }
         guard var transcription = currentTranscription,
