@@ -2192,11 +2192,11 @@ public final class TranscriptionViewModel {
                 guard let observation else { continue }
                 let published = await MainActor.run { [weak self] () -> Bool in
                     guard let self,
-                          currentTranscription?.id == transcriptionId,
-                          speakerAttribution?.fingerprint == fingerprint,
-                          pendingVoiceEnrollment == nil
+                          self.currentTranscription?.id == transcriptionId,
+                          self.speakerAttribution?.fingerprint == fingerprint,
+                          self.pendingVoiceEnrollment == nil
                     else { return false }
-                    pendingVoiceEnrollment = PendingVoiceEnrollment(
+                    self.pendingVoiceEnrollment = PendingVoiceEnrollment(
                         speakerId: speaker.id,
                         displayName: speaker.label,
                         transcriptionId: transcriptionId,
