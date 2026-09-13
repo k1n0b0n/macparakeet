@@ -183,13 +183,42 @@ private func identifySpeakerTurns(_ turns: [SpeakerTurn]) -> [IdentifiedSpeakerT
     }
 }
 
-struct TranscriptTimestampedContentView<SpeakerLabelContent: View>: View {
+/// The rename context a turn card gives its speaker label.
+///
+/// Exposed rather than built inline so the owning view can address one card:
+/// anchoring a prompt to the turn the user edited needs the same string the
+/// card hands to its rename control.
+func speakerTurnRenameContextIdentifier(_ identified: IdentifiedSpeakerTurn) -> String {
+    SpeakerRenameAccessibility.turnRenameContextIdentifier(
+        speakerID: identified.turn.speakerId,
+        firstStartMs: identified.identity.firstStartMs,
+        duplicateOrdinal: identified.identity.duplicateOrdinal
+    )
+}
+
+/// Nil for an unassigned turn, which has no speaker to rename.
+func effectiveSpeakerTurnRenameContextIdentifier(
+    _ identified: IdentifiedEffectiveSpeakerTurn
+) -> String? {
+    guard case .speaker(let speakerID) = identified.assignment else { return nil }
+    return SpeakerRenameAccessibility.turnRenameContextIdentifier(
+        speakerID: speakerID,
+        firstStartMs: identified.segments.first?.startMs,
+        duplicateOrdinal: 0
+    )
+}
+
+struct TranscriptTimestampedContentView<SpeakerLabelContent: View, TurnBanner: View>: View {
     let hasSpeakers: Bool
     let identifiedTurnCards: [IdentifiedSpeakerTurn]
     let segments: [TranscriptSegment]
     let speakerColorMap: [String: Color]
     let speakerLabelForID: (String) -> String
     let speakerLabelContent: (String, String, Color, String, Bool) -> SpeakerLabelContent
+    /// Rendered above the turn card whose rename context matches. Lets the
+    /// owning view put a prompt where the user just edited a label instead of
+    /// at the top of a transcript that can be an hour long.
+    let turnBanner: (String) -> TurnBanner
     let isSegmentActive: (Int) -> Bool
     let timestampLabel: (Int) -> String
     let isTimestampSeekable: Bool
@@ -286,26 +315,25 @@ struct TranscriptTimestampedContentView<SpeakerLabelContent: View>: View {
         let turn = identified.turn
         let speakerLabel = speakerLabelForID(turn.speakerId)
         let speakerColor = speakerColorMap[turn.speakerId] ?? DesignSystem.Colors.textTertiary
-        let renameContextID = SpeakerRenameAccessibility.turnRenameContextIdentifier(
-            speakerID: turn.speakerId,
-            firstStartMs: identified.identity.firstStartMs,
-            duplicateOrdinal: identified.identity.duplicateOrdinal
-        )
-        return TranscriptTurnCardView(
-            speakerID: turn.speakerId,
-            speakerLabel: speakerLabel,
-            renameContextID: renameContextID,
-            speakerLabelContent: speakerLabelContent,
-            speakerColor: speakerColor,
-            segments: turn.segments,
-            timestampLabel: timestampLabel,
-            isTimestampSeekable: isTimestampSeekable,
-            bodyFont: bodyFont,
-            highlightRangesByStartMs: highlightRangesByStartMs,
-            currentHighlight: currentHighlight,
-            onTimestampTap: onTimestampTap,
-            textSelectionEnabled: textSelectionEnabled
-        )
+        let renameContextID = speakerTurnRenameContextIdentifier(identified)
+        return VStack(alignment: .leading, spacing: DesignSystem.Spacing.md) {
+            turnBanner(renameContextID)
+            TranscriptTurnCardView(
+                speakerID: turn.speakerId,
+                speakerLabel: speakerLabel,
+                renameContextID: renameContextID,
+                speakerLabelContent: speakerLabelContent,
+                speakerColor: speakerColor,
+                segments: turn.segments,
+                timestampLabel: timestampLabel,
+                isTimestampSeekable: isTimestampSeekable,
+                bodyFont: bodyFont,
+                highlightRangesByStartMs: highlightRangesByStartMs,
+                currentHighlight: currentHighlight,
+                onTimestampTap: onTimestampTap,
+                textSelectionEnabled: textSelectionEnabled
+            )
+        }
         // Preserve the existing first-segment/card scroll target while later
         // rows expose their own anchors for mid-turn find results.
         .id(turn.segments.first?.startMs ?? 0)
@@ -335,30 +363,35 @@ struct TranscriptTimestampedContentView<SpeakerLabelContent: View>: View {
     }
 
     private func effectiveSpeakerTurnCard(_ identified: IdentifiedEffectiveSpeakerTurn) -> some View {
-        EditableTranscriptTurnCardView(
-            turn: identified,
-            availableSpeakers: availableSpeakers,
-            speakerColorMap: speakerColorMap,
-            speakerLabelContent: speakerLabelContent,
-            isSpeakerEditing: isSpeakerEditing,
-            isSpeakerActionDisabled: isSpeakerActionDisabled,
-            selectedSegmentIDs: selectedSegmentIDs,
-            timestampLabel: timestampLabel,
-            isTimestampSeekable: isTimestampSeekable,
-            bodyFont: bodyFont,
-            textSelectionEnabled: textSelectionEnabled,
-            highlightRanges: effectiveHighlightRanges,
-            currentHighlight: effectiveCurrentHighlight,
-            onTimestampTap: onTimestampTap,
-            onSelectSegment: onSelectSegment,
-            onToggleTurnSelection: onToggleTurnSelection,
-            onBeginSpeakerEditing: onBeginSpeakerEditing,
-            onAssignSegment: onAssignSegment,
-            onCreateSpeakerForSegment: onCreateSpeakerForSegment,
-            onSplitSegment: onSplitSegment,
-            onAssignTurn: onAssignTurn,
-            onCreateSpeakerForTurn: onCreateSpeakerForTurn
-        )
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.md) {
+            if let renameContextID = effectiveSpeakerTurnRenameContextIdentifier(identified) {
+                turnBanner(renameContextID)
+            }
+            EditableTranscriptTurnCardView(
+                turn: identified,
+                availableSpeakers: availableSpeakers,
+                speakerColorMap: speakerColorMap,
+                speakerLabelContent: speakerLabelContent,
+                isSpeakerEditing: isSpeakerEditing,
+                isSpeakerActionDisabled: isSpeakerActionDisabled,
+                selectedSegmentIDs: selectedSegmentIDs,
+                timestampLabel: timestampLabel,
+                isTimestampSeekable: isTimestampSeekable,
+                bodyFont: bodyFont,
+                textSelectionEnabled: textSelectionEnabled,
+                highlightRanges: effectiveHighlightRanges,
+                currentHighlight: effectiveCurrentHighlight,
+                onTimestampTap: onTimestampTap,
+                onSelectSegment: onSelectSegment,
+                onToggleTurnSelection: onToggleTurnSelection,
+                onBeginSpeakerEditing: onBeginSpeakerEditing,
+                onAssignSegment: onAssignSegment,
+                onCreateSpeakerForSegment: onCreateSpeakerForSegment,
+                onSplitSegment: onSplitSegment,
+                onAssignTurn: onAssignTurn,
+                onCreateSpeakerForTurn: onCreateSpeakerForTurn
+            )
+        }
         .id(identified.id)
         .onAppear(perform: onRenderedChildAppear)
     }
@@ -468,16 +501,13 @@ private struct EditableTranscriptTurnCardView<SpeakerLabelContent: View>: View {
                     .fill(speakerColor)
                     .frame(width: 10, height: 10)
 
-                if let speakerID {
+                if let speakerID,
+                   let renameContextID = effectiveSpeakerTurnRenameContextIdentifier(turn) {
                     speakerLabelContent(
                         speakerID,
                         turn.speakerLabel,
                         speakerColor,
-                        SpeakerRenameAccessibility.turnRenameContextIdentifier(
-                            speakerID: speakerID,
-                            firstStartMs: turn.segments.first?.startMs,
-                            duplicateOrdinal: 0
-                        ),
+                        renameContextID,
                         isHovering
                     )
                     .contextMenu {
