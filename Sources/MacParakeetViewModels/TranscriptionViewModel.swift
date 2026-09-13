@@ -2248,8 +2248,12 @@ public final class TranscriptionViewModel {
                     )
                 } catch {
                     // The label is applied and that is what the user asked for,
-                    // so this is reported, not rolled back.
+                    // so this is reported, not rolled back — but only on the
+                    // transcript it belongs to: this lands after an await.
                     await MainActor.run {
+                        guard self?.currentTranscription?.id == transcriptionId,
+                              self?.speakerAttribution?.fingerprint == fingerprint
+                        else { return }
                         self?.voiceEnrollmentMessage = .init(
                             text: "Could not record that confirmation.", kind: .failure
                         )
@@ -2268,10 +2272,25 @@ public final class TranscriptionViewModel {
         else { return }
         voiceSuggestions.removeAll { $0.speakerId == suggestion.speakerId }
 
-        Task {
-            try? await speakerVoiceprints.dismiss(
-                suggestion, transcriptionId: transcriptionId, fingerprint: fingerprint
-            )
+        Task { [weak self] in
+            do {
+                try await speakerVoiceprints.dismiss(
+                    suggestion, transcriptionId: transcriptionId, fingerprint: fingerprint
+                )
+            } catch {
+                // A swallowed failure hides the refusal rather than honouring
+                // it: the banner would come back on the next visit with no
+                // explanation. Put it back, and say so.
+                await MainActor.run {
+                    guard self?.currentTranscription?.id == transcriptionId,
+                          self?.speakerAttribution?.fingerprint == fingerprint
+                    else { return }
+                    self?.voiceSuggestions.append(suggestion)
+                    self?.voiceEnrollmentMessage = .init(
+                        text: "Could not record that answer.", kind: .failure
+                    )
+                }
+            }
         }
     }
 
@@ -2406,7 +2425,14 @@ public final class TranscriptionViewModel {
                 await MainActor.run { self?.publish(outcome, for: offer) }
             } catch {
                 await MainActor.run {
-                    self?.voiceEnrollmentMessage = .init(text: "Could not remember this voice.", kind: .failure)
+                    // Scoped to the offer, not the current selection: this
+                    // message answers an action taken on that transcript.
+                    guard self?.currentTranscription?.id == offer.transcriptionId,
+                          self?.speakerAttribution?.fingerprint == offer.fingerprint
+                    else { return }
+                    self?.voiceEnrollmentMessage = .init(
+                        text: "Could not remember this voice.", kind: .failure
+                    )
                 }
             }
         }
@@ -2456,6 +2482,16 @@ public final class TranscriptionViewModel {
            currentTranscription?.status == .completed,
            !(currentTranscription?.wordTimestamps ?? []).isEmpty,
            !(currentTranscription?.transcriptSegments ?? []).isEmpty {
+            // An unchanged label is not a rename. The correction service would
+            // still insert a row and advance the revision, and the success
+            // callback would then offer to remember a voice for a name the
+            // user did not actually type.
+            if let current = speakerAttribution?.speakers.first(where: { $0.id == speakerId }),
+               current.label == trimmed
+            {
+                onCommitted?(true)
+                return true
+            }
             // Loading correction history must never enable a legacy write to
             // the automatic baseline: that would bypass undo and active edits.
             guard speakerAttribution != nil else {

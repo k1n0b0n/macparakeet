@@ -10,6 +10,7 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
     private let candidate: SpeakerClusterObservation?
     private let enrollment: SpeakerProfileEnrollment
     private let enrollError: Error?
+    private let dismissFails: Bool
 
     private var storedCandidateRequests: [(UUID, String, String)] = []
     private var storedEnrollments: [(String, Bool)] = []
@@ -52,7 +53,8 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         mergeEnrollment: SpeakerProfileEnrollment? = nil,
         enrollError: Error? = nil,
         suggestions: [SpeakerVoiceprintSuggestion] = [],
-        heldForTranscription: UUID? = nil
+        heldForTranscription: UUID? = nil,
+        dismissFails: Bool = false
     ) {
         self.candidate = candidate
         self.enrollment = enrollment
@@ -60,6 +62,7 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         self.enrollError = enrollError
         self.suggestions = suggestions
         self.heldForTranscription = heldForTranscription
+        self.dismissFails = dismissFails
     }
 
     func evaluate(
@@ -152,11 +155,14 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         }
     }
 
+    struct DismissFailed: Error {}
+
     func dismiss(
         _ suggestion: SpeakerVoiceprintSuggestion,
         transcriptionId _: UUID,
         fingerprint _: TranscriptFingerprint
     ) async throws {
+        if dismissFails { throw DismissFailed() }
         lock.lock()
         storedDismissed.append(suggestion.speakerId)
         lock.unlock()
@@ -275,6 +281,42 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
 
         try await waitUntil { service.confirmed == ["S1"] }
         XCTAssertTrue(viewModel.voiceSuggestions.isEmpty)
+    }
+
+    /// Swallowing the failure hides the refusal rather than honouring it: the
+    /// banner returns on the next visit with no explanation.
+    func testAFailedDismissalPutsTheSuggestionBack() async throws {
+        let transcription = makeTranscription()
+        let service = StubVoiceprintService(
+            candidate: observation(), suggestions: [suggestion()], dismissFails: true
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+        try await waitUntil { !viewModel.voiceSuggestions.isEmpty }
+
+        viewModel.dismissVoiceSuggestion(try XCTUnwrap(viewModel.voiceSuggestions.first))
+
+        try await waitUntil { viewModel.voiceEnrollmentMessage != nil }
+        XCTAssertEqual(viewModel.voiceEnrollmentMessage?.kind, .failure)
+        XCTAssertEqual(viewModel.voiceSuggestions.map(\.speakerId), ["S1"])
+    }
+
+    /// The correction service would insert a row and advance the revision for
+    /// an identical label, and the success callback would then offer to
+    /// remember a voice for a name the user never typed.
+    func testRenamingToTheSameLabelWritesNothingAndOffersNothing() async throws {
+        var transcription = makeTranscription()
+        transcription.speakers = [SpeakerInfo(id: "S1", label: "Sarah")]
+        let service = StubVoiceprintService(candidate: observation())
+        let viewModel = try await configured(transcription, voiceprints: service)
+        try await waitUntil { viewModel.pendingVoiceEnrollment != nil }
+        viewModel.dismissVoiceEnrollment()
+        let requestsBefore = service.candidateRequests.count
+
+        XCTAssertTrue(viewModel.renameSpeaker(id: "S1", to: "  Sarah  "))
+
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertNil(viewModel.pendingVoiceEnrollment)
+        XCTAssertEqual(service.candidateRequests.count, requestsBefore)
     }
 
     func testDismissingASuggestionRecordsTheRefusalAndAppliesNoLabel() async throws {
