@@ -964,7 +964,8 @@ public enum TelemetryEventSpec: Sendable {
         crashType: String, signal: String, name: String,
         crashTimestamp: String, crashAppVer: String,
         crashOsVer: String, uuid: String,
-        slide: String, reason: String?, stackTrace: String
+        slide: String, reason: String?, stackTrace: String,
+        siCode: String? = nil, pc: String? = nil, faultAddr: String? = nil
     )
     case cliOperation(
         operationID: String,
@@ -1719,7 +1720,7 @@ extension TelemetryEventSpec {
         case .crashOccurred(
             let crashType, let signal, let name, let crashTimestamp,
             let crashAppVer, let crashOsVer, let uuid, let slide,
-            _, let stackTrace):
+            _, let stackTrace, let siCode, let pc, let faultAddr):
             return Self.compactProps(
                 ("crash_type", crashType),
                 ("signal", signal),
@@ -1729,7 +1730,10 @@ extension TelemetryEventSpec {
                 ("crash_os_ver", crashOsVer),
                 ("uuid", uuid),
                 ("slide", slide),
-                ("stack_trace", String(stackTrace.prefix(Self.maxCrashStackTraceCharacters)))
+                ("stack_trace", String(stackTrace.prefix(Self.maxCrashStackTraceCharacters))),
+                ("si_code", siCode),
+                ("pc", pc),
+                ("fault_addr", faultAddr)
             )
         case .cliOperation(
             let operationID,

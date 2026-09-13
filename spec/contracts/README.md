@@ -35,6 +35,8 @@ Each contract document should include:
 
 ## Current Contracts
 
+- [Split and Transcribe](meeting-splitting.md) — approved design; implementation pending
+
 - [Meeting Artifacts v1](meeting-artifacts-v1.md)
 - [Meeting Recovery and Retention Safety](meeting-recovery-retention.md)
 - [CLI JSON v1](cli-json-v1.md)
@@ -43,3 +45,5 @@ Each contract document should include:
 - [Custom Word Deletion](custom-word-deletion.md)
 - [Speaker Correction Submission](speaker-correction-view-model.md)
 - [Telemetry and Diagnostic Evidence](telemetry-v1.md)
+- [Share Link and Bundle v1](share-link-bundle-v1.md)
+- [Share Service v1](share-service-v1.md)
