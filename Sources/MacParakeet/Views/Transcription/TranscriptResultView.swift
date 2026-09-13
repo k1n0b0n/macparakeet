@@ -528,6 +528,14 @@ struct TranscriptResultView: View {
     /// manual-scroll pause when find never navigated.
     @State private var findPausedAutoScroll = false
     @State private var speakerRename = SpeakerRenameState()
+    /// Where each speaker was last renamed, by speaker id. A voice prompt is
+    /// rendered against the control that produced it, so it lands in the part
+    /// of the transcript the user is already looking at.
+    @State private var voiceProfileRenameContexts: [String: String] = [:]
+    /// The speaker whose answer the outcome message belongs to, captured when
+    /// the user answers rather than read back from the view model: the message
+    /// itself carries only its text.
+    @State private var voiceProfileMessageSpeakerID: String?
     @State private var editingSpeakers = false
     @State private var speakerSelection = SpeakerEditSelectionModel()
     @State private var showingNewSpeakerPrompt = false
@@ -769,6 +777,10 @@ struct TranscriptResultView: View {
         transcriptDisplayModeBeforeEdit = nil
         speakerRename = SpeakerRenameState()
         focusedSpeakerRenameContext = nil
+        // Speaker ids are positional, so a context kept across transcripts
+        // would anchor a prompt to whoever happens to be `S1` here.
+        voiceProfileRenameContexts.removeAll()
+        voiceProfileMessageSpeakerID = nil
         editingSpeakers = false
         speakerSelection.clear()
         showingNewSpeakerPrompt = false
@@ -1898,18 +1910,7 @@ struct TranscriptResultView: View {
                         meetingNoWordTimestampsBanner(banner)
                     }
 
-                    Group {
-                        if let conflict = viewModel.voiceEnrollmentConflict {
-                            voiceEnrollmentConflictBanner(conflict)
-                        } else if let offer = viewModel.pendingVoiceEnrollment {
-                            voiceEnrollmentOfferBanner(offer)
-                        }
-
-                        if let message = viewModel.voiceEnrollmentMessage {
-                            voiceEnrollmentMessageBanner(message)
-                        }
-                    }
-                    .id(Self.voiceProfileBannerAnchor)
+                    voiceProfileBanners(at: .transcriptTop)
 
                     if shouldShowTranscriptAISetupBanner {
                         chatConfigurationBanner
@@ -1991,17 +1992,6 @@ struct TranscriptResultView: View {
                     withAnimation(.easeInOut(duration: 0.25)) {
                         proxy.scrollTo(target, anchor: .center)
                     }
-                }
-            }
-            // The banner sits at the top of the transcript while the speaker
-            // that was just renamed can be anywhere in it, so on a long
-            // recording the offer appears entirely off screen and the feature
-            // looks like it did nothing. Moving the view is acceptable here
-            // because it answers a gesture the user just made.
-            .onChange(of: viewModel.pendingVoiceEnrollment?.speakerId) { _, speakerId in
-                guard speakerId != nil else { return }
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    proxy.scrollTo(Self.voiceProfileBannerAnchor, anchor: .top)
                 }
             }
             }
@@ -3839,15 +3829,108 @@ struct TranscriptResultView: View {
         )
     }
 
-    /// Shown above a meeting transcript that has text but no word timestamps
-    /// (for example, it was transcribed with Cohere). Makes the
-    /// text-only trade-off visible without promising speaker-label quality.
+    /// Where a voice-profile prompt is rendered.
+    ///
+    /// The prompt used to sit at the top of the transcript while the speaker it
+    /// names can be an hour further down, so it answered a gesture the user had
+    /// made off screen. Anchoring it to the control that produced it puts the
+    /// answer where the question was asked and needs no scrolling.
+    private enum VoiceProfileBannerPlacement: Equatable {
+        /// A turn card, addressed by the rename context of its speaker label.
+        case turn(String)
+        /// A row of the speaker overview, addressed by speaker id.
+        case overviewRow(String)
+        /// No turn card and no overview row owns this speaker — a plain-text
+        /// transcript, for instance. Keeps the prompt reachable.
+        case transcriptTop
+    }
+
+    /// Whether any prompt is waiting. Checked before resolving placements: the
+    /// resolver walks the turn list, and it runs once per rendered card.
+    private var hasVoiceProfileBanner: Bool {
+        viewModel.voiceEnrollmentConflict != nil
+            || viewModel.pendingVoiceEnrollment != nil
+            || viewModel.voiceEnrollmentMessage != nil
+    }
+
+    /// The rename contexts the transcript currently exposes for one speaker, in
+    /// reading order.
+    private func turnRenameContexts(forSpeaker speakerID: String) -> [String] {
+        guard transcriptDisplayMode == .timed, !editingTranscript else { return [] }
+        if let attribution = viewModel.speakerAttribution, !attribution.speakers.isEmpty {
+            return identifiedEffectiveSpeakerTurnCards(attribution.turns)
+                .filter { $0.assignment == .speaker(id: speakerID) }
+                .compactMap(effectiveSpeakerTurnRenameContextIdentifier)
+        }
+        return cachedIdentifiedTurnCards
+            .filter { $0.turn.speakerId == speakerID }
+            .map(speakerTurnRenameContextIdentifier)
+    }
+
+    private func voiceProfileBannerPlacement(
+        forSpeaker speakerID: String
+    ) -> VoiceProfileBannerPlacement {
+        let overviewContext = SpeakerRenameAccessibility.overviewRenameContextIdentifier(
+            for: speakerID
+        )
+        let recorded = voiceProfileRenameContexts[speakerID]
+        if recorded == overviewContext { return .overviewRow(speakerID) }
+        let contexts = turnRenameContexts(forSpeaker: speakerID)
+        // A recorded context that no longer exists means the transcript was
+        // re-diarized or re-cached under the prompt; fall back rather than
+        // render nowhere.
+        if let recorded, contexts.contains(recorded) { return .turn(recorded) }
+        if let first = contexts.first { return .turn(first) }
+        return .transcriptTop
+    }
+
+    /// The prompts that belong at one placement. Resolved into a value first so
+    /// the view builder stays a plain series of `if`s — this file's view bodies
+    /// are already among the slowest to type-check.
+    private struct VoiceProfileBannerSet {
+        var conflict: TranscriptionViewModel.PendingVoiceEnrollment?
+        var offer: TranscriptionViewModel.PendingVoiceEnrollment?
+        var message: String?
+    }
+
+    private func voiceProfileBannerSet(
+        at placement: VoiceProfileBannerPlacement
+    ) -> VoiceProfileBannerSet {
+        var set = VoiceProfileBannerSet()
+        guard hasVoiceProfileBanner else { return set }
+        if let conflict = viewModel.voiceEnrollmentConflict {
+            if voiceProfileBannerPlacement(forSpeaker: conflict.speakerId) == placement {
+                set.conflict = conflict
+            }
+        } else if let offer = viewModel.pendingVoiceEnrollment {
+            if voiceProfileBannerPlacement(forSpeaker: offer.speakerId) == placement {
+                set.offer = offer
+            }
+        }
+        if let message = viewModel.voiceEnrollmentMessage {
+            let messagePlacement = voiceProfileMessageSpeakerID
+                .map(voiceProfileBannerPlacement(forSpeaker:)) ?? .transcriptTop
+            if messagePlacement == placement { set.message = message }
+        }
+        return set
+    }
+
+    @ViewBuilder
+    private func voiceProfileBanners(at placement: VoiceProfileBannerPlacement) -> some View {
+        let set = voiceProfileBannerSet(at: placement)
+        if let conflict = set.conflict {
+            voiceEnrollmentConflictBanner(conflict)
+        } else if let offer = set.offer {
+            voiceEnrollmentOfferBanner(offer)
+        }
+        if let message = set.message {
+            voiceEnrollmentMessageBanner(message)
+        }
+    }
+
     /// Offers to remember the voice just named. Non-modal on purpose: the user
     /// came here to fix a label, and declining has to cost nothing more than
     /// ignoring it.
-    /// Scroll anchor for the voice-profile banners.
-    private static let voiceProfileBannerAnchor = "voice-profile-banners"
-
     private func voiceEnrollmentOfferBanner(
         _ offer: TranscriptionViewModel.PendingVoiceEnrollment
     ) -> some View {
@@ -3870,9 +3953,12 @@ struct TranscriptResultView: View {
             Button("Not Now") { viewModel.dismissVoiceEnrollment() }
                 .parakeetAction(.secondary)
                 .controlSize(.small)
-            Button("Remember") { viewModel.confirmVoiceEnrollment() }
-                .parakeetAction(.primary)
-                .controlSize(.small)
+            Button("Remember") {
+                voiceProfileMessageSpeakerID = offer.speakerId
+                viewModel.confirmVoiceEnrollment()
+            }
+            .parakeetAction(.primary)
+            .controlSize(.small)
         }
         .padding(DesignSystem.Spacing.md)
         .background(
@@ -3906,9 +3992,12 @@ struct TranscriptResultView: View {
             Button("Cancel") { viewModel.dismissVoiceEnrollment() }
                 .parakeetAction(.secondary)
                 .controlSize(.small)
-            Button("Same Person") { viewModel.confirmVoiceEnrollment(allowMerge: true) }
-                .parakeetAction(.secondary)
-                .controlSize(.small)
+            Button("Same Person") {
+                voiceProfileMessageSpeakerID = offer.speakerId
+                viewModel.confirmVoiceEnrollment(allowMerge: true)
+            }
+            .parakeetAction(.secondary)
+            .controlSize(.small)
         }
         .padding(DesignSystem.Spacing.md)
         .background(
@@ -3943,6 +4032,9 @@ struct TranscriptResultView: View {
         )
     }
 
+    /// Shown above a meeting transcript that has text but no word timestamps
+    /// (for example, it was transcribed with Cohere). Makes the
+    /// text-only trade-off visible without promising speaker-label quality.
     private var meetingNoWordTimestampsBannerPresentation: MeetingTimedTranscriptRecoveryBannerPresentation? {
         let hasRetainedAudio =
             onRetranscribe != nil
@@ -4166,6 +4258,7 @@ struct TranscriptResultView: View {
                     )
                 )
             },
+            turnBanner: { voiceProfileBanners(at: .turn($0)) },
             isSegmentActive: isSegmentActiveBinarySearch(segmentIndex:),
             timestampLabel: { formatTimestamp(ms: $0) },
             isTimestampSeekable: playerViewModel.playerState == .ready,
@@ -4426,6 +4519,7 @@ struct TranscriptResultView: View {
                 }
                 ForEach(speakers, id: \.id) { speaker in
                     let stats = speakerStats[speaker.id]
+                    voiceProfileBanners(at: .overviewRow(speaker.id))
                     HStack(spacing: DesignSystem.Spacing.md) {
                         Circle()
                             .fill(colorMap[speaker.id] ?? DesignSystem.Colors.textTertiary)
@@ -4629,6 +4723,10 @@ struct TranscriptResultView: View {
         let trimmed = draft.label.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return true }
         guard viewModel.renameSpeaker(id: draft.speakerID, to: trimmed) else { return false }
+        // Remembered before the offer lands: it arrives asynchronously, by
+        // which time the editor that produced it is gone.
+        voiceProfileRenameContexts[draft.speakerID] = draft.contextID
+        voiceProfileMessageSpeakerID = draft.speakerID
         if transcriptDisplayMode == .timed {
             scheduleSegmentCacheRebuild()
         }
