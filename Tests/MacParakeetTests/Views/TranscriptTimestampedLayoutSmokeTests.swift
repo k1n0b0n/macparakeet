@@ -86,6 +86,7 @@ final class TranscriptTimestampedLayoutSmokeTests: XCTestCase {
             speakerLabelContent: { _, label, color, _, _ in
                 Text(label).foregroundStyle(color)
             },
+            turnBanner: { _ in EmptyView() },
             isSegmentActive: { $0 == 1 },
             timestampLabel: { self.timestampLabel(ms: $0) },
             isTimestampSeekable: true,
