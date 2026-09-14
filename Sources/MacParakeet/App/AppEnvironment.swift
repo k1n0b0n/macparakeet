@@ -39,6 +39,9 @@ final class AppEnvironment {
     let promptEditingService: PromptEditingService
     let promptResultRepo: PromptResultRepository
     let meetingArtifactStore: MeetingArtifactStore
+    let meetingSplitRepo: MeetingSplitRepository
+    let meetingSplitService: MeetingSplitService
+    let meetingImportService: MeetingImportService
     let llmRunRepo: LLMRunRepository
     let aiFormatterProfileRepo: AIFormatterProfileRepository
     let transformHistoryRepo: TransformHistoryRepository
@@ -120,6 +123,7 @@ final class AppEnvironment {
         promptCollectionRepo = PromptCollectionRepository(dbQueue: databaseManager.dbQueue)
         promptEditingService = PromptEditingService(dbQueue: databaseManager.dbQueue)
         promptResultRepo = PromptResultRepository(dbQueue: databaseManager.dbQueue)
+        meetingSplitRepo = MeetingSplitRepository(dbQueue: databaseManager.dbQueue)
         meetingArtifactStore = MeetingArtifactStore(
             speakerAttributionReader: speakerAttributionReader,
             classificationProvider: { [databaseManager] transcriptionID in
@@ -450,6 +454,35 @@ final class AppEnvironment {
             lockFileStore: meetingRecordingLockFileStore,
             transcriptionService: transcriptionService,
             transcriptionRepo: transcriptionRepo
+        )
+
+        let savedAudioCompletionService = SavedAudioAutoPromptCompletionService(
+            promptRepo: promptRepo,
+            promptResultRepo: promptResultRepo,
+            llmService: llmService,
+            promptLabelPolicyRepository: promptLabelPolicyRepo,
+            transcriptionLabelRepository: transcriptionMeetingLabelRepo,
+            speakerAttributionReader: speakerAttributionReader,
+            meetingArtifactStore: meetingArtifactStore,
+            cardGenerator: cardGenerationService
+        )
+        meetingSplitService = MeetingSplitService(
+            transcriptionRepo: transcriptionRepo,
+            splitRepo: meetingSplitRepo,
+            transcriptionService: transcriptionService,
+            completionService: savedAudioCompletionService,
+            retentionConfig: { UserDefaultsAppRuntimePreferences.meetingAudioRetention(persistMigration: false) },
+            speechEngineSelection: { SpeechEngineSelection.finalTranscription() }
+        )
+        meetingImportService = MeetingImportService(
+            transcriptionService: transcriptionService,
+            transcriptionRepo: transcriptionRepo,
+            completionService: savedAudioCompletionService,
+            recordingsRoot: {
+                URL(fileURLWithPath: AppPaths.meetingRecordingsDir, isDirectory: true)
+            },
+            lockFileStore: meetingRecordingLockFileStore,
+            retentionConfig: { [runtimePreferences] in runtimePreferences.meetingAudioRetention }
         )
 
         derivedFieldsBackfill = DerivedFieldsBackfillService(dbQueue: databaseManager.dbQueue)

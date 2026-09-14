@@ -52,6 +52,34 @@ User triggers dictation
     → Clean up temp WAV (if storage disabled)
 ```
 
+### Shared microphone lifecycle diagnostics
+
+`AudioEngineLifecycleDiagnostics` observes engine start, idle preparation,
+recovery attempts, and stop for both dictation and meeting consumers. An
+independent utility timer can snapshot the last entered boundary while the
+platform queue or a native audio call remains blocked. Start/prepare/stop
+observers begin before queue admission; recovery timing starts with the current
+restart attempt and excludes its previously scheduled backoff.
+
+Each lifecycle can publish one `audio_engine_lifecycle` slow checkpoint after
+five seconds, then one terminal snapshot if the call returns. Start/recovery
+always publish terminal outcomes; prepare/stop publish only when slow,
+including failures. If a slow call returns before its timer runs, it publishes
+only a terminal with `was_slow=true`. This observes lifecycle progress without
+changing routing, capture, cancellation, or the existing readiness/recovery
+controls. Five seconds is an observation threshold, not a hard native timeout.
+The existing first-buffer deadline begins after native start returns; it cannot
+interrupt a native call that remains blocked during setup or start.
+
+The local record and optional telemetry event share a fresh lifecycle
+`attempt_id`, monotonic phase timings, finite route categories, and classified
+errors. That ID covers engine fallback attempts and does not identify a meeting
+or product operation. Both sinks are asynchronous and best effort; a missing
+terminal remains unknown, and an entered phase does not establish a native root
+cause. No audio render callback performs this diagnostic work. Exact fields,
+suppression, and the required server-first rollout are defined in the
+[telemetry contract](contracts/telemetry-v1.md#microphone-engine-lifecycle-observation).
+
 ---
 
 ## File Input (Transcription)
@@ -291,6 +319,7 @@ is the artifact and sidecar contract.
 |-----------|---------|
 | `SystemAudioStream` | ScreenCaptureKit system-audio wrapper - creates an audio-only `SCStream`, adapts `CMSampleBuffer` to `AVAudioPCMBuffer`, and maps first-buffer, heartbeat, and unexpected delegate stops into typed lifecycle failures |
 | `SharedMicrophoneStream` | Process-wide microphone engine owner, VPIO arbiter, synchronous buffer fan-out, source-owned startup readiness/device fallback, and terminal engine-death propagation after bounded configuration-change, callback-stall, or Bluetooth zero-filled recovery is exhausted |
+| `AudioEngineLifecycleDiagnostics` | Independent, bounded shared-microphone phase observations for the local log and optional telemetry; no capture control or product-operation counting |
 | `MicrophoneCapture` | Meeting mic subscriber with explicit mic-processing policy, effective-mode reporting, awaited teardown, and typed stall propagation |
 | `MeetingAudioCaptureService` | Actor combining the selected source stream(s) into `AsyncStream<MeetingAudioCaptureEvent>`; owns bounded fresh-instance system recovery, coalesces duplicate failures, and lets Stop invalidate every retry generation |
 | `CaptureOrchestrator` | Owns ingest/join/offset/chunk flow for live preview |
@@ -394,8 +423,11 @@ as `manifest.json`, `transcript.json`, `notes.md`, and prompt-result files.
 Full meeting deletion is the path that removes the session folder.
 
 Scheduled retention only detaches audio for completed meeting rows with stored
-audio paths. It skips any session folder that still has `recording.lock`, live
-or dead PID, because those files are active or recoverable recording input.
+audio paths. Retention age uses `audioRetentionStartedAt ?? createdAt` for both
+database selection and policy evaluation. Imported historical meetings therefore
+receive a fresh managed-audio window without changing their library chronology.
+Split eligibility uses the same clock. Retention skips any session folder that
+still has `recording.lock`, live or dead PID, because those files are active or recoverable recording input.
 Crash-recovered meetings are protected while recovery runs by the claiming
 process PID and finalization lease; once the lock is removed and the recovered
 row is completed, normal retention applies. The same lock guard protects
@@ -404,6 +436,30 @@ manual cleanup: both `TranscriptionAssetCleanup` and the
 `recording.lock` is present, including dead-owner `awaitingTranscription` locks
 whose audio is still queued for background transcription (back-to-back meeting
 recording).
+
+### External recording import
+
+[ADR-030](adr/030-external-meeting-import.md) and the
+[meeting import contract](contracts/meeting-import-v1.md) govern one-file imports.
+The app and CLI normalize a supported local audio/video file into an owned,
+system-only meeting archive: `system-raw.m4a`, zero-offset alignment metadata,
+and canonical `meeting-playback.m4a` bytes through a hard link or copy fallback.
+The external source is never moved, modified, renamed, or deleted.
+
+The verified archive and ordinary recovery lock are published before the meeting
+stub. The stub keeps the chosen historical `createdAt`, fresh
+`audioRetentionStartedAt`, and any explicit title intent. Existing meeting
+finalization supplies STT, configured diarization, text processing, indexing,
+and artifacts; ordinary settlement removes the lock after completed-row
+verification. Cards and enabled after-meeting prompts follow as best-effort
+saved-audio automation. A failure before transcript completion leaves the
+published meeting retryable; a later failure reports a warning and preserves
+the completed transcript. No new capture session or microphone permission is
+required for the import itself.
+
+The active meeting-audio retention preference applies to the managed copy.
+Delete-immediately detaches audio after successful transcription and automation;
+an unfinished retryable import keeps audio so Retry can complete the same row.
 
 ### Concurrent Operation with Dictation (ADR-015)
 

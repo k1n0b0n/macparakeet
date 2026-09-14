@@ -647,13 +647,14 @@ sets segmentation `stepRatio = 0.1`, embedding
 `minSegmentDurationSeconds = 0`, and zero-vote re-embedding enabled.
 Speaker-count constraints are applied to this preset per request.
 
-The app pins FluidAudio 0.15.6, including corrected clustering. Older upstream
+The app pins FluidAudio 0.15.7, including 0.15.6 clustering corrections and
+the 0.15.7 dual-census speaker-cap fix (FluidAudio #891). Older upstream
 VoxConverse measurements (0.25-second collar, overlap ignored) reported
 13.89% DER for the denser preset versus 15.07% for the faster default under
-0.15.4; those figures have not been re-run for the corrected pin. They are
+0.15.4; those figures have not been re-run for the current pin. They are
 not current app accuracy or throughput guarantees. Asset sizes above also
-do not measure peak process memory. See ADR-010's 2026-09-06 amendment for
-provenance and the remaining measurement gap.
+do not measure peak process memory. See ADR-010's 2026-09-06 and 2026-09-13
+amendments for provenance, the 0.15.7 pin, and the remaining DER gap.
 
 ### What's NOT included
 

@@ -53,6 +53,32 @@ speech the live transcript *should* have covered.
 
 ## Decision
 
+### 2026-09-13 amendment: pending microphone lifecycle evidence
+
+The development source adds `AudioEngineLifecycleDiagnostics` to observe shared
+microphone start, prepare, recovery attempts, and stop independently of the
+platform queue. Existing phase-completion logs cannot explain a native call
+that never returns. The observer can report the last entered boundary while
+the call is pending, including `queue_wait` before native work begins.
+
+Each lifecycle call can emit one slow checkpoint after five seconds and one
+terminal snapshot if it returns. Fast prepare/stop snapshots are suppressed,
+including failures; a slow call that finishes before the timer runs emits only
+its terminal snapshot with `was_slow=true`. The utility timer and asynchronous
+local/telemetry sinks are best effort. This is not a hard timeout, a new audio
+restart path, or a fix establishing the native root cause of issue #931.
+Callback-readiness and source-owned recovery retain their existing control
+semantics.
+
+`audio_engine_lifecycle` contains a fresh lifecycle `attempt_id`, phase timings,
+coarse route categories, and classified errors. The ID does not identify a
+meeting or product operation; these events do not change operation-health
+denominators. See the [telemetry contract](../contracts/telemetry-v1.md#microphone-engine-lifecycle-observation)
+for the bounded schema and server-first rollout. An app release and paired
+website deployment are separate from this source implementation.
+The [issue #931 investigation](../../docs/audits/2026-09-13-issue-931-startup-observability.md)
+records the incident evidence and unresolved native cause.
+
 ### 2026-07-22 field-evidence amendment: microphone callback liveness
 
 Issue #820's opt-in diagnostic captured the exact source failure that the
@@ -527,24 +553,27 @@ without a mic, a meeting, or an STT model. The audio/STT plumbing that
 
 ## Telemetry
 
-Propose privacy-safe events — **no audio, no transcript content**:
+Implemented diagnostic events contain no audio or transcript content:
 
 - `mic_stall_detected` — props: `signature` (`mic_missing` /
-  `mic_silent` / `mic_gap`), coarse `elapsed_ms` since meeting start.
-  Fired once per confirmed stall trip.
-- `meeting_transcript_repair` — props: `decision` (`accept` /
-  `selective` / `full`), `gap_count`. Fired once per finalized meeting
-  after the repair stage resolves.
+  `mic_silent` / `mic_gap`), coarse `elapsed_ms` since meeting start, and
+  `stall_count` on the first report. Repeated stalls are suppressed into
+  periodic/final summaries with `stall_count` and `total_stalled_seconds`.
+- `audio_engine_lifecycle` — development-source observer described above;
+  reports bounded phase evidence for the shared microphone across dictation,
+  meetings, and idle work. It has no meeting ID and is separate from
+  `meeting_operation` and signal-health telemetry.
 
-Add the new `TelemetryEventName` cases in
-`Sources/MacParakeetCore/Services/Telemetry/TelemetryEvent.swift`.
+`meeting_transcript_repair` remains proposed with the unimplemented repair stage:
+`decision` (`accept` / `selective` / `full`) and `gap_count`, once per finalized
+meeting after repair resolves. It is not part of the implemented event contract.
 
 > **Two-repo reminder.** Each new `TelemetryEventName` case MUST also be
 > added to `ALLOWED_EVENTS` in
 > `macparakeet-website/functions/api/telemetry.ts` **before** a
-> flag-on build ships. The telemetry Worker rejects the *entire batch*
-> if any event name is unknown, silently dropping valid co-batched
-> events. Deploy the allowlist change first.
+> client that emits it ships. The telemetry Worker returns HTTP 400 for the
+> *entire batch* if any event name is unknown. The client's permanent-rejection
+> policy drops valid co-batched events too. Deploy the allowlist change first.
 
 ## Phased Rollout
 

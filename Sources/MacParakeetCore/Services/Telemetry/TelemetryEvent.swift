@@ -112,6 +112,7 @@ public enum TelemetryEventName: String, Sendable, CaseIterable {
     case meetingAutoStopConfirmed = "meeting_auto_stop_confirmed"
     case meetingAutoStopVetoed = "meeting_auto_stop_vetoed"
     case micStallDetected = "mic_stall_detected"
+    case audioEngineLifecycle = "audio_engine_lifecycle"
     /// Universal launch-time Silero VAD model prep for VAD-guided meeting live
     /// chunking (`plans/completed/2026-05-meeting-vad-guided-live-chunking.md` §6).
     /// Confirms the installed base actually acquires the model once the feature
@@ -901,7 +902,8 @@ public enum TelemetryEventSpec: Sendable {
         systemTrackPresent: Bool?,
         notesUsed: Bool?,
         notesLengthBucket: String?,
-        errorType: String?
+        errorType: String?,
+        captureStartCompleted: Bool? = nil
     )
     case meetingRecoveryDiscovered(
         count: Int, source: TelemetryMeetingRecoverySource, phases: [MeetingRecordingLockState])
@@ -953,6 +955,9 @@ public enum TelemetryEventSpec: Sendable {
     /// - `state_busy` — recording flow was non-idle (back-to-back meeting)
     /// - `service_threw` — `MeetingRecordingService.startRecording` errored
     case calendarAutoStartFailed(reason: String)
+    // Shared microphone lifecycle checkpoints and terminal diagnostics.
+    // Separate from product operation outcomes and their failure denominators.
+    case audioEngineLifecycle(AudioEngineLifecycleSnapshot)
     // STT runtime observability. Fires when an STT runtime call (cancel-drain,
     // model-cache clear, shutdown, engine swap) exceeds the watchdog timeout.
     // Detection-only; the caller continues to await as today.
@@ -964,7 +969,8 @@ public enum TelemetryEventSpec: Sendable {
         crashType: String, signal: String, name: String,
         crashTimestamp: String, crashAppVer: String,
         crashOsVer: String, uuid: String,
-        slide: String, reason: String?, stackTrace: String
+        slide: String, reason: String?, stackTrace: String,
+        siCode: String? = nil, pc: String? = nil, faultAddr: String? = nil
     )
     case cliOperation(
         operationID: String,
@@ -1085,6 +1091,7 @@ extension TelemetryEventSpec {
         case .meetingAutoStopConfirmed: return .meetingAutoStopConfirmed
         case .meetingAutoStopVetoed: return .meetingAutoStopVetoed
         case .micStallDetected: return .micStallDetected
+        case .audioEngineLifecycle: return .audioEngineLifecycle
         case .vadModelPrep: return .vadModelPrep
         case .calendarReminderShown: return .calendarReminderShown
         case .calendarAutoStartTriggered: return .calendarAutoStartTriggered
@@ -1631,7 +1638,8 @@ extension TelemetryEventSpec {
             let systemTrackPresent,
             let notesUsed,
             let notesLengthBucket,
-            let errorType
+            let errorType,
+            let captureStartCompleted
         ):
             return Self.compactProps(
                 ("operation_id", operationID),
@@ -1647,7 +1655,8 @@ extension TelemetryEventSpec {
                 ("system_track_present", systemTrackPresent.map(Self.boolString)),
                 ("notes_used", notesUsed.map(Self.boolString)),
                 ("notes_length_bucket", notesLengthBucket),
-                ("error_type", errorType)
+                ("error_type", errorType),
+                ("capture_start_completed", captureStartCompleted.map(Self.boolString))
             )
         case .meetingRecoveryDiscovered(let count, let source, let phases):
             return [
@@ -1710,6 +1719,8 @@ extension TelemetryEventSpec {
             return ["reason": reason]
         case .calendarAutoStartFailed(let reason):
             return ["reason": reason]
+        case .audioEngineLifecycle(let snapshot):
+            return snapshot.props
         case .sttRuntimeUnhealthy(let reason):
             return ["reason": reason]
         case .errorOccurred(let domain, let code, _):
@@ -1719,7 +1730,7 @@ extension TelemetryEventSpec {
         case .crashOccurred(
             let crashType, let signal, let name, let crashTimestamp,
             let crashAppVer, let crashOsVer, let uuid, let slide,
-            _, let stackTrace):
+            _, let stackTrace, let siCode, let pc, let faultAddr):
             return Self.compactProps(
                 ("crash_type", crashType),
                 ("signal", signal),
@@ -1729,7 +1740,10 @@ extension TelemetryEventSpec {
                 ("crash_os_ver", crashOsVer),
                 ("uuid", uuid),
                 ("slide", slide),
-                ("stack_trace", String(stackTrace.prefix(Self.maxCrashStackTraceCharacters)))
+                ("stack_trace", String(stackTrace.prefix(Self.maxCrashStackTraceCharacters))),
+                ("si_code", siCode),
+                ("pc", pc),
+                ("fault_addr", faultAddr)
             )
         case .cliOperation(
             let operationID,
@@ -1940,6 +1954,10 @@ public enum TelemetryImplementedContract {
         .meetingAutoStopConfirmed: ["reason"],
         .meetingAutoStopVetoed: ["reason"],
         .micStallDetected: ["stall_count"],
+        .audioEngineLifecycle: [
+            "attempt_id", "operation", "outcome", "phase", "elapsed_ms", "phase_ms", "attempt_count",
+            "prepared", "vpio", "buffer_size", "route_source", "transport", "was_slow",
+        ],
         .vadModelPrep: ["outcome"],
         .calendarReminderShown: ["mode", "lead_minutes", "has_meet_url"],
         .calendarAutoStartTriggered: ["lead_seconds", "has_meet_url"],
@@ -1978,11 +1996,16 @@ public struct TelemetryEvent: Sendable, Encodable {
         chip: String,
         session: String,
         surface: String = "gui",
-        ts: Date = Date()
+        ts: Date = Date(),
+        gitCommit: String? = nil,
+        buildNumber: String? = nil
     ) {
         self.eventId = UUID().uuidString
         self.event = spec.name.rawValue
-        self.props = spec.props
+        var props = spec.props ?? [:]
+        if let gitCommit { props["git_commit"] = gitCommit }
+        if let buildNumber { props["build_number"] = buildNumber }
+        self.props = props.isEmpty ? nil : props
         self.appVer = appVer
         self.osVer = osVer
         self.locale = locale

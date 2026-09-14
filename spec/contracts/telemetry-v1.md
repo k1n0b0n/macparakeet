@@ -19,6 +19,26 @@ records the September 2026 tightening of privacy and outcome semantics.
 - Retain bounded error categories and safe numeric codes. CoreAudio domain/code
   information may be recovered from the recognized Foundation wrapper format;
   arbitrary numbers, domains and descriptions are not error categories.
+- `crash_occurred`'s optional `si_code`, `pc`, and `fault_addr` fields are
+  narrow signal-context evidence (fault subtype, interrupted instruction
+  pointer, faulting address), not free-form text. The on-disk report parser
+  validates each before it reaches the typed event factory — `si_code` must
+  contain at most 10 ASCII digits with an optional minus sign and parse
+  as a signed 32-bit integer (`Int32`), covering the full range
+  including the `-2147483648`/`2147483647` boundaries without signed
+  overflow; `pc`/`fault_addr` must be a bounded `0x`-prefixed hex value — and
+  drops a corrupted or out-of-range value rather than forwarding it. These
+  fields are omitted from non-signal reports, even if present in the file.
+- The C signal handler assembles that on-disk report with bounded manual
+  byte-appending, not `snprintf` or another allocating/locale-aware
+  formatter, and its write path retries on `EINTR` and short writes but gives
+  up (without spinning) as soon as `write` reports `0` bytes accepted or a
+  non-retryable error. Optional backtrace capture runs only after a complete
+  minimum report write; failed writes skip that unsafe step. Persistence of the on-disk report is best-effort:
+  `write`/`close` succeeding means the OS accepted the bytes, not that they
+  survived a power loss, and a second thread crashing concurrently with the
+  first gets no report of its own rather than the handler waiting for the
+  first to finish.
 - Opt-out clears the queue and invalidates retries and batches waiting behind
   another flush, including batches encoded but not started. Request admission
   and URL task resume share the queue-clear lock. In-flight requests can complete. An explicit final
@@ -56,6 +76,46 @@ valid events in that batch, and report delivery failure rather than repeatedly
 poisoning the queue. Consent changes invalidate retry timing and queued snapshots.
 Local structured `telemetry_transport` logs contain outcomes, numeric status,
 batch/drop counts and retry timing, never event props or response bodies.
+
+## Microphone engine lifecycle observation
+
+`audio_engine_lifecycle` observes shared-microphone start, prepare, recovery,
+and stop. The [catalog](../../docs/telemetry.md#5e-microphone-engine-lifecycle)
+defines its finite phases and exact safe fields. A fresh random `attempt_id`
+identifies one lifecycle call and its route fallbacks, not a meeting,
+`operation_id`, user, or persistent identity. When a meeting or dictation
+owns capture, the snapshot also carries that workflow's `workflow_id` and
+`consumer` (`meeting` or `dictation`) so agents can join it to the parent
+`*_operation` event. Casing is preserved so it matches the product event.
+Idle prepare/stop omit those fields. Each recovery
+attempt starts a new observer; its elapsed time excludes scheduled recovery
+backoff.
+
+An independent utility timer can publish one `outcome=slow` checkpoint after
+five seconds while native lifecycle work remains pending. It is observability
+only: no audio graph changes, cancellation, restart, or hard timeout. Start and
+recovery publish one terminal outcome if they return. Prepare and stop publish
+only when slow, including failures/cancellations; fast lifecycle snapshots are
+suppressed in both sinks. Finishing after the threshold before the timer runs
+publishes only a terminal with `was_slow=true`. A checkpoint and terminal share
+`attempt_id` but have distinct envelope event UUIDs. `slow` is not a failure or
+terminal outcome, and these rows do not change product-operation denominators.
+
+The snapshot uses monotonic bounded durations, finite route/transport categories,
+and classified errors without descriptions or device identities. Its local
+sorted line and typed network event share the same snapshot. A serial utility
+emission queue preserves order without doing sink work under the diagnostic
+state lock or on the audio render callback. Local append and network delivery
+are asynchronous and best effort under their existing policies. Missing
+terminal evidence remains unknown; a phase checkpoint is not native root-cause
+proof or a guarantee that this operation will recover.
+
+Queued events copy sanitized `git_commit` and `build_number` into props. D1
+does not persist extra envelope columns; invalid values become `unknown`.
+`meeting_operation.capture_start_completed` is `false` when `stage=start_recording`
+has no recording output, `true` when an output exists, and omitted otherwise.
+The same `workflow_id` / `consumer` pair is appended to local audio log lines
+at enqueue time so a deferred write cannot pick up a later session.
 
 ## Aggregate evidence
 
@@ -104,6 +164,18 @@ diagnostics or claim that the absence of logged failures means successful audio.
 
 - `TelemetryServiceTests` pins payload encoding, omitted free-form error/crash
   fields, and opt-out admission/queue-generation races.
+- `CrashReporterTests` pins old/new/missing/malformed `si_code`/`pc`/`fault_addr`
+  round-tripping through the report-file parser, including both `Int32`
+  boundaries for `si_code`. `CrashReporterSignalProbeTests` runs the
+  production C signal handler in a real subprocess (compiled from the
+  checked-in `MPKCrashSignalHandler.c`) to confirm the on-disk report reflects
+  the actual interrupted instruction pointer and a `SIG_DFL` process exit, not
+  a synthetic value. It also links harness-side `write`/`backtrace`
+  overrides ahead of libSystem at compile time (no production test flags) to
+  prove the minimal report still lands under short writes, `EINTR`, and a
+  failed/empty backtrace or abrupt exit from backtrace. A child-owned alarm
+  bounds probe execution. A `write` that always reports 0 bytes
+  accepted stops the write loop and skips backtrace instead of hanging.
 - `TelemetryErrorClassifierTests` pins bounded error categories and recognized
   native CoreAudio status extraction.
 - `CLITelemetryTests` pins successful thrown exits, environment overrides, and
@@ -111,6 +183,15 @@ diagnostics or claim that the absence of logged failures means successful audio.
 - `AudioCaptureDiagnosticsTests` pins local correlation fields, bridged error
   codes, and append/rotation behavior. The offline parser's synthetic-file
   tests live in `scripts/dev/tests/test_query_audio_diagnostics.py`.
+- `AudioEngineLifecycleDiagnosticsTests` pins the lifecycle schema, phase
+  clocks, suppression, cancellation, safe labels/errors, capture-correlation
+  join fields, and checkpoint/terminal races.
+  `MicrophoneEngineLifecycleDiagnosticsTests` checks the platform
+  integration through injected lifecycle operations; neither proves physical
+  hardware recovery or the cause of a native framework hang.
+- `scripts/ci/check-telemetry-allowlist.sh` fails when Swift emits an event
+  name absent from the website `ALLOWED_EVENTS` set. CI skips when the private
+  website repo cannot be read.
 
 Update the typed event factories, focused tests, and
 [telemetry catalog](../../docs/telemetry.md) together when this boundary changes.
@@ -124,3 +205,8 @@ plan. App-repo tests do not verify the deployed website contract or ingestion.
 App changes require a new app/CLI build. Website changes are in the separate
 `macparakeet-website` repository and require deployment. Existing stored private
 rows and previously cached public responses are not deleted by source changes.
+Deploy the website validator before releasing a client that emits new
+`audio_engine_lifecycle` keys (`workflow_id`, `consumer`, `git_commit`,
+`build_number`). Unknown event names still 400 the whole batch; unknown keys
+on this event are dropped silently. A paired source change or passing app
+tests does not prove the deployed endpoint accepts the fields.

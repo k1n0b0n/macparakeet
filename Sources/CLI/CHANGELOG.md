@@ -89,6 +89,74 @@ by checking exit code first: `2` = misuse, `1` = runtime, `0` = success.
 
 ## [Unreleased]
 
+### Added
+
+- `meetings show --json` and `meetings transcript --format json` expose
+  additive `textCorrectionsApplied` and `transcriptTextAlignment` fields.
+  Effective transcript segments may include `isTextEdited: true`; automatic
+  word text and timing remain available as original evidence.
+- `meetings corrections edit-line|merge-lines|undo|redo|reset` gives agents
+  optimistic, revision-checked access to the same reversible timed transcript
+  journal as the app. Successful JSON writes return the updated effective
+  transcript and revision.
+- Meeting list previews now use the effective corrected transcript. One-to-one
+  text edits retain the durable segment ID; structural edits include additive
+  `anchorTranscriptSegmentIDs`. Transcripts without word timestamps report
+  `transcriptTextAlignment: "untimed"`.
+- `meetings import <path>` imports one supported local audio or video file as
+  a managed meeting. It accepts optional `--title` and historical
+  `--started-at`, supports `--json` and `--envelope`, keeps progress on stderr,
+  and returns a stable `MeetingImportRecord`. Complete and transcript-saved
+  partial results exit zero; a retryable transcription prints its saved
+  meeting record before exiting one. Callers should open that saved meeting and
+  retry its transcription rather than running another import, which would
+  create a second meeting. SIGINT after publication also prints the durable
+  record before exiting `130`.
+- `meetings split preview|create|status|resume|discard` splits a saved
+  meeting recording into independent parts, each receiving its own first
+  transcription and normal enabled completion automation. `preview` is
+  read-only; `create` supports `--dry-run`, `--key`, `--expected-identity`
+  and idempotent retry (including after the original recording has been
+  deleted, once committed); `status --source` accepts an exact source UUID
+  even after that recording is gone. A completed operation with any failed
+  child still prints its full result, then exits non-zero. `create`/`resume`
+  honor Ctrl-C (SIGINT): in-flight work finishes settling before the process
+  exits `130`, per the CLI's existing exit-code contract.
+
+### Changed
+
+- Meeting JSON, prompt context, and exports use the effective timed-text
+  correction projection. Corrected lines retain segment-envelope timing and
+  are never represented as word-aligned; legacy whole-text edits remain
+  untimed.
+- `transcribe` and `retranscribe` still use the same `--speaker-count` /
+  `--speaker-min` / `--speaker-max` flags and JSON speaker fields. The engines
+  now run FluidAudio 0.15.7. Exact / max caps are held against both cluster
+  censuses (FluidAudio #891). Flags, defaults, and JSON schema are unchanged.
+  Auto speaker detection is unchanged and still not an exact count.
+
+### Fixed
+
+- `history clear-meeting-audio` now holds one meeting-media mutation lease
+  across both managed-file removal and database path detachment, so concurrent
+  split publication cannot observe a partially cleared recording library.
+- `meetings split create`/`resume` now resolve the meeting-recordings root
+  from the CLI's own shared app preferences domain instead of always
+  `.standard`, so a non-default `meetingArtifactsFolder` preference is
+  honored.
+- `meetings split preview`'s `hasRawMicrophone`/`hasRawSystem`/
+  `hasCleanedMicrophone` now describe whether that track will actually be
+  exported (file *and* usable alignment metadata), not merely whether the
+  file exists on disk.
+- `meetings split create` now rejects empty and whitespace-only part titles
+  before invoking the shared split service; the Core boundary enforces the
+  same rule for non-CLI callers.
+- `meetings split create` retrying an already-discarded idempotency key, and
+  `meetings split resume` of a discarded or still-preparing operation, now
+  surface a specific actionable message (a discarded key/operation needs a
+  fresh `--key`; a still-preparing operation should be retried with `create`)
+  instead of a generic status error.
+
 ## [4.0.0] — 2026-09-07
 
 ### Added
