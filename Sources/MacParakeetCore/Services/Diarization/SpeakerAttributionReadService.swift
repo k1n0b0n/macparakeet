@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import GRDB
 
@@ -36,7 +37,8 @@ public struct SpeakerAttributionProjection: Sendable {
         let automaticSpeakers = automaticTranscription.speakers ?? []
         let automaticDiarization = automaticTranscription.diarizationSegments ?? []
         guard
-            attribution.words != automaticWords
+            attribution.hasTextCorrections
+                || attribution.words != automaticWords
                 || attribution.speakers != automaticSpeakers
                 || attribution.diarizationSegments != automaticDiarization
         else {
@@ -48,8 +50,67 @@ public struct SpeakerAttributionProjection: Sendable {
         result.speakerCount = attribution.speakers.count
         result.wordTimestamps = attribution.words
         result.diarizationSegments = attribution.diarizationSegments
-        result.transcriptSegments = materializedDurableSegments()
+        if attribution.hasTextCorrections {
+            result.cleanTranscript = attribution.editableSegments
+                .map(\.text)
+                .joined(separator: " ")
+            result.transcriptSegments = materializedTextCorrectedSegments()
+        } else {
+            result.transcriptSegments = materializedDurableSegments()
+        }
         return result
+    }
+
+    private func materializedTextCorrectedSegments() -> [TranscriptSegmentRecord] {
+        let labelsByID = Dictionary(
+            attribution.speakers.map { ($0.id, $0.label) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return attribution.editableSegments.map { segment in
+            let speakerID: String?
+            let speakerLabel: String
+            switch segment.assignment {
+            case .speaker(let id):
+                speakerID = id
+                speakerLabel = labelsByID[id] ?? id
+            case .unassigned:
+                speakerID = nil
+                speakerLabel = "Unassigned"
+            }
+            let keepsDurableIdentity =
+                segment.anchorTranscriptSegmentIDs.count == 1
+                && automaticTranscription.transcriptSegments?.first(where: {
+                    $0.id == segment.anchorTranscriptSegmentIDs[0]
+                })?.wordRange == segment.wordRange
+            return TranscriptSegmentRecord(
+                id: keepsDurableIdentity
+                    ? segment.anchorTranscriptSegmentIDs[0]
+                    : effectiveSegmentID(for: segment.id),
+                startMs: segment.startMs,
+                endMs: segment.endMs,
+                speakerId: speakerID,
+                speakerLabel: speakerLabel,
+                text: segment.text,
+                wordRange: segment.wordRange,
+                isTextEdited: segment.isTextEdited ? true : nil,
+                anchorTranscriptSegmentIDs: keepsDurableIdentity
+                    ? nil
+                    : segment.anchorTranscriptSegmentIDs
+            )
+        }
+    }
+
+    private func effectiveSegmentID(for id: SpeakerEditableSegmentID) -> UUID {
+        let input = "\(id.transcriptionId.uuidString.lowercased()):\(id.transcriptFingerprint.rawValue):\(id.wordRange.startIndex):\(id.wordRange.endIndexExclusive)"
+        var bytes = Array(SHA256.hash(data: Data(input.utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x50
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
     }
 
     private func materializedDurableSegments() -> [TranscriptSegmentRecord]? {
@@ -114,8 +175,14 @@ public final class SpeakerAttributionReadService: SpeakerAttributionReading,
         }
     }
 
-    /// Card provenance only needs exported transcript content, not the full
-    /// timed-display projection when no correction branch is active.
+    /// Returns effective content without building the full timed-display
+    /// projection when no correction branch is active.
+    public func effectiveTranscription(for transcription: Transcription) throws -> Transcription {
+        try dbQueue.read { db in
+            try Self.effectiveTranscription(transcription: transcription, in: db)
+        }
+    }
+
     static func effectiveTranscription(
         transcription: Transcription,
         in db: Database

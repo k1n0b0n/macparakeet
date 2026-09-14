@@ -52,9 +52,28 @@ public struct TranscriptionLibraryQuery: Sendable, Equatable {
 public struct TranscriptionLibraryPage: Sendable {
     public var items: [Transcription]
     public var hasMore: Bool
+    /// Effective corrected transcript text for Library presentation. Items
+    /// remain canonical database rows so transient projections cannot be saved
+    /// back over automatic evidence.
+    public var effectiveTranscriptTextByID: [UUID: String]
 
-    public init(items: [Transcription], hasMore: Bool) {
+    public init(
+        items: [Transcription],
+        hasMore: Bool,
+        effectiveTranscriptTextByID: [UUID: String] = [:]
+    ) {
         self.items = items
         self.hasMore = hasMore
+        self.effectiveTranscriptTextByID = effectiveTranscriptTextByID
+    }
+}
+
+public struct TranscriptionLibraryItem: Sendable {
+    public let transcription: Transcription
+    public let effectiveTranscriptText: String?
+
+    public init(transcription: Transcription, effectiveTranscriptText: String?) {
+        self.transcription = transcription
+        self.effectiveTranscriptText = effectiveTranscriptText
     }
 }

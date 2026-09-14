@@ -292,7 +292,7 @@ final class MeetingRecordingPanelViewModelTests: XCTestCase {
             viewModel.statusMessage.contains("Library"), "Wrapper points the user at the Library for recovery")
         XCTAssertEqual(
             viewModel.compactErrorRecoveryMessage,
-            "Meeting interrupted. Open Library to retry transcription or export captured audio."
+            "Meeting interrupted. If audio was captured, open Library to retry transcription or export it."
         )
         XCTAssertFalse(viewModel.showsElapsedTime)
     }

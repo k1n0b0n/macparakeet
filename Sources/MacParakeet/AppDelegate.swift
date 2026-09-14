@@ -34,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Runtime Services
 
     private var appEnvironment: AppEnvironment?
+    private var shareStopObserver: NSObjectProtocol?
+    private let shareManagementViewModel: ShareManagementViewModel? = AppFeatures.isShareLinksAvailable() ? ShareManagementViewModel() : nil
     private var hotkeyCoordinator: AppHotkeyCoordinator?
     private var dictationFlowCoordinator: DictationFlowCoordinator?
     private var meetingRecordingFlowCoordinator: MeetingRecordingFlowCoordinator?
@@ -70,6 +72,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let feedbackViewModel = FeedbackViewModel()
     private let discoverViewModel = DiscoverViewModel()
     private let libraryViewModel = TranscriptionLibraryViewModel()
+    /// One shared app-owned handle for native Split and transcribe: created
+    /// eagerly (before `AppEnvironment` exists) and `configure`d once it does,
+    /// so a single running batch survives the sheet closing and is reachable
+    /// from every entry point (`TranscriptResultView`, `TranscriptionLibraryView`,
+    /// `MeetingsView`) without duplicating state per view.
+    private let meetingSplitViewModel = MeetingSplitViewModel()
+    private let meetingImportViewModel = MeetingImportViewModel()
     private let meetingsLibraryViewModel = TranscriptionLibraryViewModel(scope: .meetings)
     private let llmSettingsViewModel = LLMSettingsViewModel()
     private let chatViewModel = TranscriptChatViewModel()
@@ -206,6 +215,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         libraryViewModel: libraryViewModel,
         meetingsWorkspaceViewModel: meetingsWorkspaceViewModel,
         meetingPillViewModel: meetingPillViewModel,
+        meetingSplitViewModel: meetingSplitViewModel,
+        meetingImportViewModel: meetingImportViewModel,
+        shareManagementViewModel: shareManagementViewModel,
         updaterController: updaterController,
         onRecordMeeting: { [weak self] in
             self?.toggleMeetingRecording(originatesFromWindow: true)
@@ -383,6 +395,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let shareStopObserver {
+            DistributedNotificationCenter.default().removeObserver(shareStopObserver)
+            self.shareStopObserver = nil
+        }
         // Telemetry.flushForTermination() is handled by TelemetryService's own
         // NSApplicationWillTerminateNotification observer — calling it here too
         // would send duplicate appQuit events and double the termination delay.
@@ -495,6 +511,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let appEnvironment {
             meetingAudioRetentionSweepCoordinator.scheduleForegroundSweepIfDue(environment: appEnvironment)
         }
+        if let sharing = shareManagementViewModel { Task { await sharing.refresh() } }
     }
 
     // MARK: - Startup
@@ -517,9 +534,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupEnvironment(_ env: AppEnvironment) {
         appEnvironment = env
+        if let shareStopObserver {
+            DistributedNotificationCenter.default().removeObserver(shareStopObserver)
+            self.shareStopObserver = nil
+        }
+        if let coordinator = env.shareCoordinator, let sharing = shareManagementViewModel {
+            shareStopObserver = DistributedNotificationCenter.default().addObserver(
+                forName: .macParakeetShareStopQueued, object: nil, queue: .main
+            ) { _ in
+                Task { await coordinator.resumePendingWork() }
+            }
+            let reader = env.speakerAttributionReader
+            let results = env.promptResultRepo
+            sharing.configure(service: coordinator) { id in
+                try await Task.detached(priority: .userInitiated) {
+                    guard let projection = try reader.resolve(transcriptionId: id) else { return nil as ShareDraftSource? }
+                    let source = projection.effectiveTranscription
+                    let summaries = try results.fetchAll(transcriptionId: id).map {
+                        ShareDraftSource.Summary(id: $0.id, title: $0.promptName, markdown: $0.content)
+                    }
+                    return ShareDraftSource(transcription: source, title: source.effectiveDisplayTitle, summaries: summaries)
+                }.value
+            }
+            Task { await sharing.refresh() }
+        }
         settingsViewModel.onAccessibilityGranted = { [weak self] in
             self?.handleAccessibilityGrant()
         }
+        meetingSplitViewModel.configure(
+            service: env.meetingSplitService,
+            recordingLookup: { [repository = env.transcriptionRepo] id in try repository.fetch(id: id) },
+            onChildrenPublished: { [weak self] in
+                self?.libraryViewModel.loadTranscriptions()
+                self?.meetingsWorkspaceViewModel.refreshRecentMeetings()
+            }
+        )
+        meetingImportViewModel.configure(
+            service: env.meetingImportService,
+            onMeetingPublished: { [weak self] _ in
+                self?.libraryViewModel.loadTranscriptions()
+                self?.meetingsWorkspaceViewModel.refreshRecentMeetings()
+            }
+        )
 
         let runtime = environmentConfigurer.configure(
             environment: env,

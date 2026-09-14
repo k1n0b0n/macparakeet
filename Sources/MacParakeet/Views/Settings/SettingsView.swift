@@ -191,7 +191,15 @@ struct SettingsView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             viewModel.engine.refreshSpeechEngineSwitchAvailability()
-            Task { await viewModel.refreshCalendarNotificationAuthorization() }
+            guard AppFeatures.calendarEnabled,
+                rootViewModel.activeTab == .capture,
+                displayedCaptureWorkflow == .meetings,
+                !rootViewModel.isSearching
+            else { return }
+            Task {
+                await viewModel.refreshCalendarAccess()
+                await viewModel.refreshCalendarNotificationAuthorization()
+            }
         }
         .onAppear {
             if requestedTab != nil || requestedAnchor != nil {
@@ -3484,7 +3492,7 @@ struct SettingsView: View {
     private var privacyCard: some View {
         settingsCard(
             title: "Privacy",
-            subtitle: "Your audio and transcriptions never leave your device.",
+            subtitle: "Speech recognition stays on your Mac. Optional network features use only text you choose.",
             icon: "hand.raised"
         ) {
             VStack(alignment: .leading, spacing: DesignSystem.Spacing.sm) {

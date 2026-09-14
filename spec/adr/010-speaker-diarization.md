@@ -2,7 +2,7 @@
 
 > Status: **Accepted**
 > Date: 2026-03-04
-> Current scope (2026-09-07): offline file/URL transcription and optional isolated system-track meeting refinement. The original comparison tables and performance rationale below are historical; the 2026-09-06 amendment governs the corrected FluidAudio 0.15.6 configuration and measurement caveats.
+> Current scope (2026-09-13): offline file/URL transcription and optional isolated system-track meeting refinement. The original comparison tables and performance rationale below are historical; the 2026-09-06 amendment governs the high-accuracy preset, and the 2026-09-13 amendment records the FluidAudio 0.15.7 pin.
 
 ## Context
 
@@ -197,7 +197,8 @@ Skip diarization for: dictation (single speaker by design), or when the correspo
 > clusters VBx kept, had no constrained assignment of local speakers that share
 > a segmentation chunk, and seeded K-Means re-clustering from `UInt64.random`.
 > FluidAudio fixed all four in 0.15.5 (PR #735) and 0.15.6 (PR #802). The
-> app now pins `exact: "0.15.6"`. The claim above that this is "the same
+> app then pinned `exact: "0.15.6"` (superseded by the 2026-09-13 pin). The
+> claim above that this is "the same
 > pipeline pyannote's commercial API uses" was unsupported and is withdrawn:
 > `precision-2` is a distinct model, 4 to 10 DER points better on pyannote's
 > own table. The `~17.7% AMI` figure in the table above was produced by
@@ -253,6 +254,22 @@ Skip diarization for: dictation (single speaker by design), or when the correspo
 > upgrade and is unchanged; `ANEInferenceGate` still serializes the
 > diarizer's Neural Engine work on macOS 14.
 
+> **Amendment (2026-09-13, issue #1023):** The app pins `exact: "0.15.7"`.
+> FluidAudio 0.15.7 (#891) holds Exact / `maxSpeakers` against both the argmax
+> cluster census and the π (`pi > 1e-7`) census. 0.15.6 could skip K-Means when
+> argmax already looked in-bounds and then revive the extra component. The
+> published counterexample is synthetic; the 7-file VoxConverse v0.3 test
+> slice in `benchmarks/diarization` already bound Exact 1 and max 2 on 0.15.6.
+> Follow-up Exact 1 on a 1-speaker over-split (`wibky` 2→1) and Exact 2 on
+> over-split 2-/3-speaker files also bound on both pins. Unconstrained rosters
+> were identical on 0.15.7 (over-split did not move). LibriSpeech `test-clean`
+> 200 utterances (stride), Parakeet v3, simple normalizer: 2.56% WER on the
+> kept 0.15.6 CLI vs 2.23% on 0.15.7 (192/200 identical hypotheses).
+> `DiarizationService.pipelineRevision` is `fluidaudio-0.15.7`. Full tables:
+> `benchmarks/diarization/2026-09-13-fluidaudio-0.15.7-eval.md`. This does not
+> close Auto 1:1 over-splits (#944); `MeetingSpeakerPrior` is still
+> `max = n + 1`.
+
 **Model preparation (2026-09-07):** The service shares one model-loading task
 across speaker constraints and initializes each configured manager from those
 models. Downloads and loading run outside `ANEInferenceGate`; the service
@@ -297,6 +314,13 @@ model bundles.
 > when the transcript has named speakers. See
 > `plans/active/2026-09-05-speaker-attribution-editing.md` and
 > `spec/01-data-model.md` for the command and persistence contracts.
+
+> **Amendment (2026-09-13):** [ADR-031](031-timed-transcript-corrections.md)
+> extends the same correction journal and Undo/Redo cursor with timed-line text
+> replacement and adjacent same-speaker line merge. Corrected text is aligned
+> only to its effective segment envelope. Automatic word text/timing and raw
+> diarization evidence remain unchanged, so this does not alter the diarization
+> model or claim per-word timing for rewritten text.
 
 ## Rationale
 

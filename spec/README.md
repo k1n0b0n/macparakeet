@@ -24,6 +24,7 @@
 | 12 | [Processing Layer](12-processing-layer.md) | Versioned prompts, label routing, and multi-summary contract | Active |
 | 13 | [Agent Workflows](13-agent-workflows.md) | Future actions, workflows, agents, voice control, App Intents | Draft |
 | 14 | [Per-Prompt Inference Settings](14-per-prompt-inference-settings.md) | Version-owned generation settings and effective-setting snapshots | Initial implementation via [PR #968](https://github.com/moona3k/macparakeet/pull/968); versioning and Transform extension in [PR #961](https://github.com/moona3k/macparakeet/pull/961) |
+| 15 | [Shareable Transcript Snapshots](15-shareable-transcripts.md) | Explicit encrypted text sharing, recipient experience, lifecycle, and privacy boundary | Implemented behind a default-off flag; public release pending |
 
 ## Boundary Contracts
 
@@ -35,6 +36,10 @@ when changing one of those surfaces.
 [Speaker Voiceprints](contracts/speaker-voiceprints.md) defines the experimental
 voice-profile gate, local storage lifecycle and export exclusion. Implementation
 behind that gate is separate from accuracy evaluation and official release.
+
+[Share Link and Bundle v1](contracts/share-link-bundle-v1.md) and
+[Share Service v1](contracts/share-service-v1.md) define the encrypted
+recipient-link, bundle, anonymous owner, lifecycle, and deletion boundaries.
 
 ## Design References
 
@@ -68,12 +73,13 @@ These decisions are final. Do not second-guess them.
 | Channel | Status | Notes |
 |---------|--------|-------|
 | Stable DMG `0.7.3` | User-facing release, recommended for normal use | Dictation, file/media URL transcription, System Default microphone routing, separate live/final speech-engine routes, meeting recording with cleaned-mic finalization and bounded capture lifecycle, calendar auto-start and activity-based auto-stop (both opt-in, default off), Transforms, VAD-guided meeting live-preview chunking, optional Nemotron Beta, Cohere, and WhisperKit, bundled CLI 3.0, exports, vocabulary, AI features |
-| Development source (this revision) | Unreleased; `main` and feature branches are not the stable download | CLI 4.0.0, a major bump because `export --stdout --format txt` now matches TXT file export (see [Sources/CLI/CHANGELOG.md](../Sources/CLI/CHANGELOG.md)); per-prompt inference settings and effective-request receipts; segment search/context and knowledge cards; saved meeting-note editing and opt-in notes context; transcript-scoped speaker corrections with Undo/Redo across display, retrieval, exports and AI; rich Markdown results/chat; DAPT export; confirmed bulk vocabulary deletion; Library grid/list layouts; menu-bar and Discover visibility preferences; quiet meeting completion; AI-setup preservation; capture/recovery and transcript-context hardening. Check branch/commit identity; do not attribute these changes to the stable DMG. |
+| Development source (this revision) | Unreleased; `main` and feature branches are not the stable download | CLI 4.0.0, a major bump because `export --stdout --format txt` now matches TXT file export (see [Sources/CLI/CHANGELOG.md](../Sources/CLI/CHANGELOG.md)); split and transcribe for saved meetings in the native app and public CLI; per-prompt inference settings and effective-request receipts; segment search/context and knowledge cards; saved meeting-note editing and opt-in notes context; transcript-scoped text, line-boundary, and speaker corrections with Undo/Redo across display, playback, retrieval, exports and AI; rich Markdown results/chat; DAPT export; confirmed bulk vocabulary deletion; Library grid/list layouts; menu-bar and Discover visibility preferences; quiet meeting completion; AI-setup preservation; capture/recovery and transcript-context hardening. Check branch/commit identity; do not attribute these changes to the stable DMG. |
 
 Feature gates in the current source (`Sources/MacParakeetCore/AppFeatures.swift`); an implemented gated surface is not a shipped feature:
 
 | Flag | Value | Release note |
 |------|-------|--------------|
+| `shareLinksEnabled` | `false` | Encrypted text sharing is implemented but not publicly enabled. DEBUG builds may expose it with `--enable-share-links`; release builds ignore that argument. See the [implementation and release handoff](../docs/share-links-implementation.md). |
 | `meetingRecordingEnabled` | `true` | Shipping meeting-recording surface |
 | `calendarEnabled` | `true` | Shipping calendar reminders/auto-start; per-user auto-start defaults off |
 | `meetingAutoStopEnabled` | `true` | Shipping ADR-023 surface; per-user setting defaults off, so recordings stop manually until the user opts in |
@@ -133,6 +139,11 @@ accepted direction is not proof that every phase is implemented or released.
 | [ADR-026](adr/026-asr-engine-strategy.md) | ASR engine and runtime strategy — local-only reaffirmed; two runtimes (FluidAudio primary, WhisperKit fallback); engines grow as variants not new cards; capability registry required before a new engine family; Apple SpeechTranscriber spike-only |
 | [ADR-027](adr/027-product-north-star.md) | Product north star — MacParakeet is the private speech memory of your Mac; Library (search + QA + export) becomes the center of gravity; agent access first-class; ambient capture parked (not rejected); session-based capture stands |
 | [ADR-028](adr/028-meeting-echo-cancellation.md) | Offline meeting echo cancellation via derived cleaned-mic artifact |
+| [ADR-029](adr/029-encrypted-shareable-transcript-snapshots.md) | Explicit encrypted, expiring transcript-derived snapshots as a hosted export rather than Library sync |
+| [ADR-030](adr/030-external-meeting-import.md) | Import external recordings as managed meetings with historical chronology, fresh audio retention, and ordinary recovery |
+| [ADR-031](adr/031-timed-transcript-corrections.md) | One effective transcript from immutable automatic evidence plus reversible segment-timed text and speaker corrections |
+
+The [meeting import v1 contract](contracts/meeting-import-v1.md) defines the shared app/CLI input, ownership, and durable-result boundary.
 
 ## Version Roadmap
 
@@ -283,9 +294,10 @@ Dictation + transcription + history + settings. Get audio in, text out, pasted i
 - [x] Plain-noun tab strip with one ambient indicator (ADR-020 §1, amended 2026-05-02): `Notes`, `Transcript`, `Ask` plus a breathing dot on Ask while `chatViewModel.isStreaming`; `ViewThatFits` collapses the dot into the tooltip at the 360px floor
 - [x] STT failure copy refinement (ADR-020): "Recording Error" → "Meeting interrupted" + Library-recovery hint wrapper around the technical detail
 
-Calendar-related code is implemented and **enabled** (`AppFeatures.calendarEnabled = true`) after the post-#318 reliability hardening. It surfaces the Settings subsection, first-use permission prompt, search entry, reminder notifications, auto-start countdown, and coordinator polling; auto-start defaults to mode `.off`, so it is strictly opt-in:
+Calendar-related code is implemented and **enabled** (`AppFeatures.calendarEnabled = true`) after the post-#318 reliability hardening. It surfaces the Settings subsection, first-use permission prompt, search entry, reminder notifications, auto-start countdown, and coordinator polling; auto-start defaults to mode `.off`, so it is strictly opt-in. EventKit includes Microsoft 365 and Exchange calendars enabled in System Settings → Internet Accounts without a MacParakeet Microsoft sign-in:
 
 - [x] Calendar-driven reminders (ADR-017 Phase 1): EventKit integration + first-use prompt + settings + per-calendar include list
+- [x] Provider discovery: Outlook/Microsoft 365/Exchange Settings search terms, always-visible Internet Accounts guidance, and explicit/reactivation calendar refresh
 - [x] Pre-meeting macOS notifications at configurable lead time (off / 1 / 5 / 10 min)
 - [x] Auto-start countdown toast (ADR-017 Phase 2): 5s cancellable, top-right, non-activating
 - [x] Activity-based auto-stop replacement (ADR-023 Phases A+B): enabled in the v0.7 release train, with a separate per-user setting defaulting off; scheduled end times remain removed, and app-quit or sustained dual-channel silence must persist through grace and a veto countdown

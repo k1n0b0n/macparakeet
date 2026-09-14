@@ -63,6 +63,34 @@ exhaustion. Meeting mic and system-audio first-buffer/stall events distinguish
 the two sources. Combine these observations; a missing stop record is unknown,
 and low signal alone is not proof that an engine stopped.
 
+For startup that never reaches the first buffer, query the shared-microphone
+lifecycle observer separately:
+
+```sh
+python3 scripts/dev/query_audio_diagnostics.py --path /tmp/copied-audio.log --event audio_engine_lifecycle --limit 100
+```
+
+Group returned fields by `attempt_id` within the selected process. A `slow`
+checkpoint describes the last entered native/queue boundary after at least five
+seconds; a later terminal has the same attempt ID. Inspect `phase`, `phase_ms`,
+`elapsed_ms`, `attempt_count`, and `phase_<phase>_ms`. On failure,
+`last_error_phase` preserves the last recorded error's origin even when `phase`
+has advanced to teardown. When a meeting or dictation owns capture, neighboring
+lines in the same process also carry `workflow_id` and `consumer`; join those
+to `meeting_operation` / `dictation_operation` in telemetry. Idle prepare/stop
+omit them. Fast prepare/stop are suppressed. This utility has no
+attempt-ID filter; select the returned records locally, and check the scan/limit
+counters before treating an absent terminal as meaningful.
+
+The observer covers the shared microphone, not ScreenCaptureKit system capture.
+It cannot interrupt a blocked native call or establish its native cause. In a
+meeting health summary, `capture_start_completed=false` means the capture start
+report never completed; `source_mode=unknown` is not proof of bad user selection.
+See the [lifecycle catalog](telemetry.md#5e-microphone-engine-lifecycle) and
+[issue 931 investigation](audits/2026-09-13-issue-931-startup-observability.md)
+for field semantics and evidence limits. Do not sum checkpoints into operation
+failure rates or upload the complete local log as a telemetry event.
+
 The log retains only about 5 MB and best-effort writes can fail. New file sink
 failures are reported through OSLog's `AudioCaptureDiagnostics` category as
 `audio_diagnostic_write_failed`. Shareable file error fields contain classified

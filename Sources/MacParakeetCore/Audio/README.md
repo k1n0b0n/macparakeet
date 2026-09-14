@@ -99,6 +99,27 @@ owned by `AppEnvironment`.
   after `CaptureOrchestrator` pairs `MeetingAudioCaptureService` mic/system events.
 
 **Helpers**
+
+- `AudioEngineLifecycleDiagnostics.swift` — records `audio_engine_lifecycle`
+  snapshots for shared microphone start, idle prepare, recovery attempts, and
+  stop. Each observer has a utility timer independent of the platform queue;
+  start/prepare/stop observers begin before waiting for that queue. It can
+  therefore report `queue_wait` or the last entered native phase while the
+  lifecycle call remains blocked. No work is added to the audio render callback.
+  A pending operation has at most one `outcome=slow` checkpoint scheduled at
+  five seconds, then one terminal snapshot if the call returns. Timer scheduling
+  and sink delivery are best effort; this is neither a hard timeout nor a new
+  restart/cancellation path. Fast prepare/stop snapshots, including failures,
+  are suppressed to keep recurring idle work bounded. Start/recovery always
+  publish their terminal snapshot; a slow operation that finishes before the
+  observer runs can publish only a terminal with `was_slow=true`.
+  The local line and optional network event share a generated `attempt_id`,
+  monotonic phase timings, finite route categories, and classified errors.
+  Emission is serial and asynchronous outside the recorder's state lock;
+  local append and telemetry delivery are both best effort. The ID identifies
+  this engine lifecycle call and its fallback attempts, not a recording or
+  product operation. See the [event catalog](../../../docs/telemetry.md#5e-microphone-engine-lifecycle)
+  and [boundary contract](../../../spec/contracts/telemetry-v1.md#microphone-engine-lifecycle-observation).
 - `AudioCaptureDiagnostics.swift` — public `append(_:)` to
   `~/Library/Logs/MacParakeet/dictation-audio.log`. At the 5 MB cap it retains
   the newest complete lines instead of deleting the whole history. Used by every
@@ -302,13 +323,18 @@ A2DP, they can explicitly select the Mac's built-in mic in Settings. The idle
 warm-capture suppression above remains separate and still prevents Instant
 Dictation from holding a Bluetooth input open between active sessions.
 Each active attempt is accepted only after a usable tap buffer arrives. A route
-that starts but produces no callback is torn down after one second and the
-existing chain advances. On Bluetooth or unresolved input topology, exact-zero
-PCM does not satisfy readiness; the next route can therefore recover issue #541
-without imposing an acoustic threshold on positively identified USB, built-in,
-or virtual inputs. For VPIO buffers, readiness inspects only microphone channel
-0 so render/reference audio cannot hide a failed mic; raw multichannel input
-checks every input channel. System Default generation is captured before route
+that starts but produces no usable buffer is torn down after one second. If an
+implicit System Default attempt resolves to Bluetooth and times out, the
+platform rebuilds the route snapshot and gives the refreshed implicit default
+one fresh-engine attempt before advancing to the built-in fallback (issue
+#1009). The retry stays implicit, follows a concurrent macOS default-input
+change, and is limited to one per engine configure attempt, including recovery.
+On Bluetooth or unresolved input topology, exact-zero PCM does not satisfy
+readiness; the next route can therefore recover issue #541 without imposing an
+acoustic threshold on positively identified USB, built-in, or virtual inputs.
+For VPIO buffers, readiness inspects only microphone channel 0 so
+render/reference audio cannot hide a failed mic; raw multichannel input checks
+every input channel. System Default generation is captured before route
 resolution, and engine-configuration observation begins before `start()`.
 Each usable buffer is stamped with the configuration generation that produced
 it: a Bluetooth profile-change notification before that buffer is accepted,
@@ -376,6 +402,14 @@ existing `isRunning=` (platform `running` flag).
 (`shared_mic_engine_start_timing`) so a slow first-buffer report can be split
 between device setting, VPIO toggling, input format lookup, tap install, and
 `AVAudioEngine.start()`.
+Those return-time timings cannot describe a native call that has not returned.
+The independent `audio_engine_lifecycle` checkpoint fills that evidence gap;
+its `phase` is the last entered boundary, not proof of a native root cause.
+This instrumentation does not establish or repair the underlying native failure
+reported in issue #931. Existing first-buffer readiness and source-liveness
+recovery remain separate controls.
+See the [startup investigation](../../../docs/audits/2026-09-13-issue-931-startup-observability.md)
+for incident evidence and the limits of the implemented changes.
 
 **First-buffer can arrive before timers are armed.** When subscribing
 from an actor, the AVAudioEngine tap can fire its first buffer

@@ -95,3 +95,57 @@ struct SpeakerEditSelectionModel: Equatable {
         segments.filter { selectedIDs.contains($0.id) }
     }
 }
+
+enum TimedTranscriptMergeDirection: Hashable {
+    case previous
+    case next
+}
+
+/// Resolves the only safe line merge offered by the timed transcript UI:
+/// two neighboring effective segments with the same current assignment.
+enum TimedTranscriptMergeModel {
+    static func availability(
+        in segments: [SpeakerEditableSegment]
+    ) -> [SpeakerEditableSegmentID: Set<TimedTranscriptMergeDirection>] {
+        guard segments.count > 1 else { return [:] }
+        var result: [SpeakerEditableSegmentID: Set<TimedTranscriptMergeDirection>] = [:]
+        for (first, second) in zip(segments, segments.dropFirst())
+        where first.assignment == second.assignment
+            && first.wordRange.endIndexExclusive == second.wordRange.startIndex
+        {
+            result[first.id, default: []].insert(.next)
+            result[second.id, default: []].insert(.previous)
+        }
+        return result
+    }
+
+    static func pair(
+        for segmentID: SpeakerEditableSegmentID,
+        direction: TimedTranscriptMergeDirection,
+        in segments: [SpeakerEditableSegment]
+    ) -> [SpeakerEditableSegment]? {
+        guard let index = segments.firstIndex(where: { $0.id == segmentID }) else {
+            return nil
+        }
+        let neighborIndex = direction == .previous ? index - 1 : index + 1
+        guard segments.indices.contains(neighborIndex) else { return nil }
+
+        let firstIndex = min(index, neighborIndex)
+        let secondIndex = max(index, neighborIndex)
+        let first = segments[firstIndex]
+        let second = segments[secondIndex]
+        guard first.assignment == second.assignment,
+              first.wordRange.endIndexExclusive == second.wordRange.startIndex
+        else {
+            return nil
+        }
+        return [first, second]
+    }
+}
+
+enum TimedTranscriptSplitModel {
+    static func canSplit(_ segment: SpeakerEditableSegment?) -> Bool {
+        guard let segment, !segment.hasTextOverride else { return false }
+        return segment.wordRange.endIndexExclusive - segment.wordRange.startIndex > 1
+    }
+}

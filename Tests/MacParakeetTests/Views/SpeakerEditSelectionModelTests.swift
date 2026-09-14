@@ -114,6 +114,90 @@ final class SpeakerEditSelectionModelTests: XCTestCase {
         XCTAssertEqual(model.selectedSegments(from: segments).map(\.id), [ids[0], ids[2]])
     }
 
+    func testTimedMergeRequiresAdjacentSegmentsWithSameEffectiveAssignment() {
+        var segments = makeSegments(3)
+        var availability = TimedTranscriptMergeModel.availability(in: segments)
+
+        XCTAssertEqual(availability[segments[0].id], [.next])
+        XCTAssertEqual(availability[segments[1].id], [.previous, .next])
+        XCTAssertEqual(availability[segments[2].id], [.previous])
+
+        XCTAssertEqual(
+            TimedTranscriptMergeModel.pair(for: segments[1].id, direction: .previous, in: segments)?.map(\.id),
+            [segments[0].id, segments[1].id]
+        )
+        XCTAssertEqual(
+            TimedTranscriptMergeModel.pair(for: segments[1].id, direction: .next, in: segments)?.map(\.id),
+            [segments[1].id, segments[2].id]
+        )
+        XCTAssertNil(
+            TimedTranscriptMergeModel.pair(for: segments[0].id, direction: .previous, in: segments)
+        )
+
+        let original = segments[2]
+        segments[2] = SpeakerEditableSegment(
+            id: original.id,
+            anchorTranscriptSegmentIDs: original.anchorTranscriptSegmentIDs,
+            startMs: original.startMs,
+            endMs: original.endMs,
+            text: original.text,
+            assignment: .unassigned,
+            automaticSpeakerIDs: original.automaticSpeakerIDs,
+            sourceProvenance: original.sourceProvenance,
+            isManuallySplit: original.isManuallySplit,
+            isTextEdited: original.isTextEdited
+        )
+        availability = TimedTranscriptMergeModel.availability(in: segments)
+        XCTAssertEqual(availability[segments[1].id], [.previous])
+        XCTAssertNil(availability[segments[2].id])
+        XCTAssertNil(
+            TimedTranscriptMergeModel.pair(for: segments[1].id, direction: .next, in: segments)
+        )
+    }
+
+    func testTimedSplitAllowsBoundaryOnlyEditButRejectsRewrittenText() {
+        let automatic = SpeakerEditableSegment(
+            id: makeID(range: 0..<2),
+            anchorTranscriptSegmentIDs: [UUID()],
+            startMs: 0,
+            endMs: 500,
+            text: "one two",
+            assignment: .speaker(id: "S1"),
+            automaticSpeakerIDs: ["S1"],
+            sourceProvenance: [],
+            isManuallySplit: false
+        )
+        let boundaryOnly = SpeakerEditableSegment(
+            id: automatic.id,
+            anchorTranscriptSegmentIDs: automatic.anchorTranscriptSegmentIDs,
+            startMs: automatic.startMs,
+            endMs: automatic.endMs,
+            text: automatic.text,
+            assignment: automatic.assignment,
+            automaticSpeakerIDs: automatic.automaticSpeakerIDs,
+            sourceProvenance: automatic.sourceProvenance,
+            isManuallySplit: automatic.isManuallySplit,
+            isTextEdited: true,
+            hasTextOverride: false
+        )
+        let rewritten = SpeakerEditableSegment(
+            id: automatic.id,
+            anchorTranscriptSegmentIDs: automatic.anchorTranscriptSegmentIDs,
+            startMs: automatic.startMs,
+            endMs: automatic.endMs,
+            text: "Corrected line.",
+            assignment: automatic.assignment,
+            automaticSpeakerIDs: automatic.automaticSpeakerIDs,
+            sourceProvenance: automatic.sourceProvenance,
+            isManuallySplit: automatic.isManuallySplit,
+            isTextEdited: true,
+            hasTextOverride: true
+        )
+
+        XCTAssertTrue(TimedTranscriptSplitModel.canSplit(boundaryOnly))
+        XCTAssertFalse(TimedTranscriptSplitModel.canSplit(rewritten))
+    }
+
     private func makeIDs(_ count: Int) -> [SpeakerEditableSegmentID] {
         (0..<count).map { makeID(range: $0..<($0 + 1)) }
     }

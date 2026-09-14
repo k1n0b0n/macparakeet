@@ -10,6 +10,7 @@ struct MeetingsCommand: AsyncParsableCommand {
             ListSubcommand.self,
             ShowSubcommand.self,
             TranscriptSubcommand.self,
+            CorrectionsSubcommand.self,
             NotesSubcommand.self,
             ResultsSubcommand.self,
             TypesSubcommand.self,
@@ -17,6 +18,8 @@ struct MeetingsCommand: AsyncParsableCommand {
             ClassifySubcommand.self,
             ArtifactSubcommand.self,
             ExportSubcommand.self,
+            SplitSubcommand.self,
+            ImportSubcommand.self,
         ]
     )
 
@@ -66,7 +69,7 @@ struct MeetingsCommand: AsyncParsableCommand {
                 let labelIDs = try Set(label.map {
                     try findMeetingLabel($0, repo: labelRepo, includeArchived: true).id
                 })
-                let meetings = try repositories.transcriptions.fetchLibraryPage(
+                let page = try repositories.transcriptions.fetchLibraryPage(
                     query: TranscriptionLibraryQuery(
                         sourceType: .meeting,
                         meetingTypeIDs: typeIDs,
@@ -75,14 +78,16 @@ struct MeetingsCommand: AsyncParsableCommand {
                         limit: limit,
                         includeProcessing: true
                     )
-                ).items
+                )
+                let meetings = page.items
                 let promptResultCounts = try repositories.promptResults.counts(
                     transcriptionIds: meetings.map(\.id)
                 )
                 let classificationService = MeetingClassificationService(dbQueue: repositories.database.dbQueue)
                 let items = try meetings.map { transcription in
-                    MeetingListItem(
+                    return MeetingListItem(
                         transcription,
+                        effectiveTranscriptText: page.effectiveTranscriptTextByID[transcription.id],
                         promptResultCount: promptResultCounts[transcription.id] ?? 0,
                         classification: try classificationService.classification(for: transcription.id)
                     )
@@ -195,6 +200,253 @@ struct MeetingsCommand: AsyncParsableCommand {
                     print(exportService.formatSRT(projection: projection))
                 case .vtt:
                     print(exportService.formatVTT(projection: projection))
+                }
+            }
+        }
+    }
+
+    struct CorrectionsSubcommand: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "corrections",
+            abstract: "Edit timed transcript lines through the reversible correction journal.",
+            subcommands: [
+                EditLine.self,
+                MergeLines.self,
+                Undo.self,
+                Redo.self,
+                Reset.self,
+            ]
+        )
+
+        struct EditLine: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "edit-line",
+                abstract: "Replace one timed line while retaining its segment envelope."
+            )
+
+            @Argument(help: "Meeting UUID, UUID prefix, or exact title.")
+            var meeting: String
+
+            @Option(name: .long, help: "Segment UUID from meetings transcript --format json.")
+            var segment: String
+
+            @Option(name: .long, help: "Replacement text.")
+            var text: String?
+
+            @Flag(name: .long, help: "Read replacement text from stdin.")
+            var stdin = false
+
+            @Option(name: .long, help: "Expected speakerCorrectionRevision from the last read.")
+            var expectedRevision: Int
+
+            @Flag(name: .long, help: "Emit the updated transcript object as JSON.")
+            var json = false
+
+            @Flag(name: .long, help: "Wrap JSON output in an ok/data/meta envelope.")
+            var envelope = false
+
+            @Option(help: "Path to SQLite database file (defaults to the app database).")
+            var database: String?
+
+            func validate() throws {
+                if text != nil && stdin {
+                    throw ValidationError("Use either --text or --stdin, not both.")
+                }
+                if text == nil && !stdin {
+                    throw ValidationError("Pass --text or --stdin.")
+                }
+                guard expectedRevision >= 0 else {
+                    throw ValidationError("--expected-revision must be >= 0.")
+                }
+                try validateJSONEnvelopeFlags(json: json, envelope: envelope)
+            }
+
+            func run() async throws {
+                try await emitJSONOrRethrow(json: json || envelope) {
+                    let replacement = try correctionTextInput(text: text, stdin: stdin)
+                    try await runMeetingCorrection(
+                        meeting: meeting,
+                        expectedRevision: expectedRevision,
+                        database: database,
+                        json: json,
+                        envelope: envelope,
+                        commandName: "meetings corrections edit-line"
+                    ) { projection in
+                        .editText(
+                            target: try correctionTarget(segment: segment, in: projection),
+                            text: replacement
+                        )
+                    }
+                }
+            }
+        }
+
+        struct MergeLines: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "merge-lines",
+                abstract: "Merge adjacent same-speaker timed lines."
+            )
+
+            @Argument(help: "Meeting UUID, UUID prefix, or exact title.")
+            var meeting: String
+
+            @Option(name: .long, help: "Segment UUID in transcript order; repeat at least twice.")
+            var segment: [String] = []
+
+            @Option(name: .long, help: "Expected speakerCorrectionRevision from the last read.")
+            var expectedRevision: Int
+
+            @Flag(name: .long, help: "Emit the updated transcript object as JSON.")
+            var json = false
+
+            @Flag(name: .long, help: "Wrap JSON output in an ok/data/meta envelope.")
+            var envelope = false
+
+            @Option(help: "Path to SQLite database file (defaults to the app database).")
+            var database: String?
+
+            func validate() throws {
+                guard segment.count >= 2 else {
+                    throw ValidationError("Pass --segment at least twice.")
+                }
+                guard expectedRevision >= 0 else {
+                    throw ValidationError("--expected-revision must be >= 0.")
+                }
+                try validateJSONEnvelopeFlags(json: json, envelope: envelope)
+            }
+
+            func run() async throws {
+                try await emitJSONOrRethrow(json: json || envelope) {
+                    try await runMeetingCorrection(
+                        meeting: meeting,
+                        expectedRevision: expectedRevision,
+                        database: database,
+                        json: json,
+                        envelope: envelope,
+                        commandName: "meetings corrections merge-lines"
+                    ) { projection in
+                        .mergeSegments(
+                            targets: try segment.map { try correctionTarget(segment: $0, in: projection) }
+                        )
+                    }
+                }
+            }
+        }
+
+        struct Undo: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "undo",
+                abstract: "Undo the active transcript correction."
+            )
+
+            @Argument(help: "Meeting UUID, UUID prefix, or exact title.")
+            var meeting: String
+
+            @Option(name: .long, help: "Expected speakerCorrectionRevision from the last transcript read.")
+            var expectedRevision: Int
+
+            @Flag(name: .long, help: "Emit the updated transcript object as JSON.")
+            var json = false
+
+            @Flag(name: .long, help: "Wrap JSON output in an ok/data/meta envelope.")
+            var envelope = false
+
+            @Option(help: "Path to SQLite database file (defaults to the app database).")
+            var database: String?
+
+            func validate() throws {
+                guard expectedRevision >= 0 else {
+                    throw ValidationError("--expected-revision must be >= 0.")
+                }
+                try validateJSONEnvelopeFlags(json: json, envelope: envelope)
+            }
+
+            func run() async throws {
+                try await emitJSONOrRethrow(json: json || envelope) {
+                    try await runMeetingCorrectionHistory(
+                        .undo, meeting: meeting, expectedRevision: expectedRevision,
+                        database: database, json: json, envelope: envelope
+                    )
+                }
+            }
+        }
+
+        struct Redo: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "redo",
+                abstract: "Redo the next transcript correction."
+            )
+
+            @Argument(help: "Meeting UUID, UUID prefix, or exact title.")
+            var meeting: String
+
+            @Option(name: .long, help: "Expected speakerCorrectionRevision from the last transcript read.")
+            var expectedRevision: Int
+
+            @Flag(name: .long, help: "Emit the updated transcript object as JSON.")
+            var json = false
+
+            @Flag(name: .long, help: "Wrap JSON output in an ok/data/meta envelope.")
+            var envelope = false
+
+            @Option(help: "Path to SQLite database file (defaults to the app database).")
+            var database: String?
+
+            func validate() throws {
+                guard expectedRevision >= 0 else {
+                    throw ValidationError("--expected-revision must be >= 0.")
+                }
+                try validateJSONEnvelopeFlags(json: json, envelope: envelope)
+            }
+
+            func run() async throws {
+                try await emitJSONOrRethrow(json: json || envelope) {
+                    try await runMeetingCorrectionHistory(
+                        .redo, meeting: meeting, expectedRevision: expectedRevision,
+                        database: database, json: json, envelope: envelope
+                    )
+                }
+            }
+        }
+
+        struct Reset: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "reset",
+                abstract: "Reset the active transcript projection to its automatic baseline."
+            )
+
+            @Argument(help: "Meeting UUID, UUID prefix, or exact title.")
+            var meeting: String
+
+            @Option(name: .long, help: "Expected speakerCorrectionRevision from the last transcript read.")
+            var expectedRevision: Int
+
+            @Flag(name: .long, help: "Emit the updated transcript object as JSON.")
+            var json = false
+
+            @Flag(name: .long, help: "Wrap JSON output in an ok/data/meta envelope.")
+            var envelope = false
+
+            @Option(help: "Path to SQLite database file (defaults to the app database).")
+            var database: String?
+
+            func validate() throws {
+                guard expectedRevision >= 0 else {
+                    throw ValidationError("--expected-revision must be >= 0.")
+                }
+                try validateJSONEnvelopeFlags(json: json, envelope: envelope)
+            }
+
+            func run() async throws {
+                try await emitJSONOrRethrow(json: json || envelope) {
+                    try await runMeetingCorrection(
+                        meeting: meeting,
+                        expectedRevision: expectedRevision,
+                        database: database,
+                        json: json,
+                        envelope: envelope,
+                        commandName: "meetings corrections reset"
+                    ) { _ in .reset }
                 }
             }
         }
@@ -683,6 +935,7 @@ private struct MeetingListItem: Encodable {
 
     init(
         _ transcription: Transcription,
+        effectiveTranscriptText: String? = nil,
         promptResultCount: Int = 0,
         classification: MeetingClassification = MeetingClassification(meetingType: nil, labels: [])
     ) {
@@ -698,7 +951,7 @@ private struct MeetingListItem: Encodable {
         notesPreview = preview(transcription.userNotes)
         self.promptResultCount = promptResultCount
         hasPromptResults = promptResultCount > 0
-        let transcript = preferredTranscriptText(transcription)
+        let transcript = effectiveTranscriptText ?? preferredTranscriptText(transcription)
         hasTranscript = !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         transcriptPreview = preview(transcript)
         let artifactFolder = MeetingArtifactStore.sessionFolderURL(for: transcription)
@@ -750,7 +1003,9 @@ private struct MeetingRecord: Encodable {
     let meetingType: MeetingType?
     let meetingLabels: [MeetingLabel]
     let speakerCorrectionsApplied: Bool
+    let textCorrectionsApplied: Bool
     let speakerCorrectionRevision: Int
+    let transcriptTextAlignment: TranscriptTextAlignment
 
     init(
         _ projection: SpeakerAttributionProjection,
@@ -800,7 +1055,9 @@ private struct MeetingRecord: Encodable {
         meetingType = classification.meetingType
         meetingLabels = classification.labels
         speakerCorrectionsApplied = projection.correctionsApplied
+        textCorrectionsApplied = projection.attribution.hasTextCorrections
         speakerCorrectionRevision = projection.correctionRevision
+        transcriptTextAlignment = transcription.transcriptTextAlignment
     }
 }
 
@@ -816,7 +1073,9 @@ private struct MeetingTranscriptRecord: Encodable {
     let meetingType: MeetingType?
     let meetingLabels: [MeetingLabel]
     let speakerCorrectionsApplied: Bool
+    let textCorrectionsApplied: Bool
     let speakerCorrectionRevision: Int
+    let transcriptTextAlignment: TranscriptTextAlignment
 
     init(
         _ projection: SpeakerAttributionProjection,
@@ -834,7 +1093,9 @@ private struct MeetingTranscriptRecord: Encodable {
         meetingType = classification.meetingType
         meetingLabels = classification.labels
         speakerCorrectionsApplied = projection.correctionsApplied
+        textCorrectionsApplied = projection.attribution.hasTextCorrections
         speakerCorrectionRevision = projection.correctionRevision
+        transcriptTextAlignment = transcription.transcriptTextAlignment
     }
 }
 
@@ -907,6 +1168,147 @@ private struct MeetingResultRepositories {
     let transcriptions: TranscriptionRepository
     let promptResults: PromptResultRepositoryProtocol
     let speakerAttributionReader: SpeakerAttributionReadService
+}
+
+private enum MeetingCorrectionHistoryAction {
+    case undo
+    case redo
+}
+
+enum MeetingCorrectionCLIError: LocalizedError {
+    case invalidSegment(String)
+    case segmentNotTargetable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidSegment(let value):
+            "No current editable transcript line matches segment '\(value)'. Read the latest transcript JSON and retry."
+        case .segmentNotTargetable(let value):
+            "Transcript line '\(value)' cannot be targeted at line granularity because it does not map to one editable range."
+        }
+    }
+}
+
+private func correctionTarget(
+    segment value: String,
+    in projection: SpeakerAttributionProjection
+) throws -> SpeakerCorrectionTarget {
+    guard let id = UUID(uuidString: value) else {
+        throw MeetingCorrectionCLIError.invalidSegment(value)
+    }
+    guard
+        let segment = projection.effectiveTranscription.transcriptSegments?.first(where: {
+            $0.id == id
+        })
+    else {
+        throw MeetingCorrectionCLIError.invalidSegment(value)
+    }
+    guard
+        let editable = projection.attribution.editableSegments.first(where: {
+            $0.wordRange == segment.wordRange
+        })
+    else {
+        throw MeetingCorrectionCLIError.segmentNotTargetable(value)
+    }
+    return SpeakerCorrectionTarget(
+        anchorTranscriptSegmentIDs: editable.anchorTranscriptSegmentIDs,
+        wordRange: editable.wordRange
+    )
+}
+
+private func runMeetingCorrection(
+    meeting: String,
+    expectedRevision: Int,
+    database: String?,
+    json: Bool,
+    envelope: Bool,
+    commandName: String,
+    command: (SpeakerAttributionProjection) throws -> SpeakerCorrectionCommand
+) async throws {
+    let repositories = try makeMeetingResultRepositories(database: database)
+    let transcription = try findMeeting(idOrName: meeting, repo: repositories.transcriptions)
+    let projection = try repositories.speakerAttributionReader.resolve(transcription: transcription)
+    guard projection.correctionRevision == expectedRevision else {
+        throw SpeakerCorrectionServiceError.conflict
+    }
+    _ = try await SpeakerCorrectionService(dbQueue: repositories.database.dbQueue).apply(
+        transcriptionId: transcription.id,
+        command: try command(projection),
+        expectedFingerprint: projection.attribution.fingerprint,
+        expectedRevision: expectedRevision
+    )
+    try await emitMeetingCorrectionResult(
+        transcription: transcription,
+        repositories: repositories,
+        json: json,
+        envelope: envelope,
+        commandName: commandName
+    )
+}
+
+private func runMeetingCorrectionHistory(
+    _ action: MeetingCorrectionHistoryAction,
+    meeting: String,
+    expectedRevision: Int,
+    database: String?,
+    json: Bool,
+    envelope: Bool
+) async throws {
+    let repositories = try makeMeetingResultRepositories(database: database)
+    let transcription = try findMeeting(idOrName: meeting, repo: repositories.transcriptions)
+    let projection = try repositories.speakerAttributionReader.resolve(transcription: transcription)
+    guard projection.correctionRevision == expectedRevision else {
+        throw SpeakerCorrectionServiceError.conflict
+    }
+    let service = SpeakerCorrectionService(dbQueue: repositories.database.dbQueue)
+    let commandName: String
+    switch action {
+    case .undo:
+        _ = try await service.undo(
+            transcriptionId: transcription.id,
+            expectedFingerprint: projection.attribution.fingerprint,
+            expectedRevision: expectedRevision
+        )
+        commandName = "meetings corrections undo"
+    case .redo:
+        _ = try await service.redo(
+            transcriptionId: transcription.id,
+            expectedFingerprint: projection.attribution.fingerprint,
+            expectedRevision: expectedRevision
+        )
+        commandName = "meetings corrections redo"
+    }
+    try await emitMeetingCorrectionResult(
+        transcription: transcription,
+        repositories: repositories,
+        json: json,
+        envelope: envelope,
+        commandName: commandName
+    )
+}
+
+private func emitMeetingCorrectionResult(
+    transcription: Transcription,
+    repositories: MeetingResultRepositories,
+    json: Bool,
+    envelope: Bool,
+    commandName: String
+) async throws {
+    _ = await refreshMeetingArtifactBestEffort(
+        transcription: transcription,
+        repositories: repositories
+    )
+    let projection = try repositories.speakerAttributionReader.resolve(transcription: transcription)
+    let classification = try MeetingClassificationService(dbQueue: repositories.database.dbQueue)
+        .classification(for: transcription.id)
+    let record = MeetingTranscriptRecord(projection, classification: classification)
+    if envelope {
+        try printEnvelope(command: commandName, data: record)
+    } else if json {
+        try printJSON(record)
+    } else {
+        print("Updated transcript for \(record.title) (revision \(record.speakerCorrectionRevision)).")
+    }
 }
 
 private func makeMeetingResultRepositories(database: String?) throws -> MeetingResultRepositories {
@@ -1037,6 +1439,23 @@ private func resultInput(content: String?, stdin: Bool) throws -> String {
     }
     guard normalizedNonEmptyText(value) != nil else { throw CLIInputError.empty }
     return value
+}
+
+private func correctionTextInput(text: String?, stdin: Bool) throws -> String {
+    let value: String
+    if stdin {
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        guard let decoded = String(data: data, encoding: .utf8) else {
+            throw CLIInputError.invalidEncoding
+        }
+        value = decoded
+    } else {
+        value = text ?? ""
+    }
+    guard let normalized = normalizedNonEmptyText(value) else {
+        throw CLIInputError.empty
+    }
+    return normalized
 }
 
 private func appendedNotes(existing: String?, addition: String) -> String {

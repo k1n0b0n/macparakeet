@@ -39,6 +39,8 @@ processes own their connections.
   - `TransformHistoryRepository.swift` — local Transform run history (input/output/source app/timings; ADR-022).
   - `AIFormatterProfileRepository.swift` — app/category formatter profiles (normal product exposure remains feature-gated).
   - `LLMRunRepository.swift` — local metadata ledger for persisted LLM runs (provider/model/tokens/latency/status/required source link; no prompt/input/output content).
+  - `MeetingSplitRepository.swift` — Split and transcribe's operation receipt: idempotent `begin`, one-transaction `publish` of all child rows, and per-child processing progress. Persistence only; media export, STT and completion automation are owned elsewhere (see `spec/contracts/meeting-splitting.md`).
+  - `SharePublicationRepository.swift` — local ledger + durable ordered outbox for encrypted share snapshots (`spec/contracts/share-service-v1.md`). Owns a transaction-scoped detach-and-enqueue helper for source deletion; never cascaded from `transcriptions`.
 
 ## Cross-references
 
@@ -124,6 +126,24 @@ projection when no correction head exists. Retranscription publishes replacement
 segments and deletes the old card atomically; list queries suppress any stale
 card that remains after other canonical edits.
 
+**Split-operation receipts intentionally have no foreign key to
+`transcriptions`.** `meeting_split_operations` (v0.42) and
+`transcriptions.splitProvenance` are plain snapshots, not live joins: they
+must stay readable, and `begin`/lookup must keep returning fixed child ids,
+after the source or any child row is deleted. `MeetingSplitRepository.publish`
+is the one place that creates split children: a single transaction that
+revalidates a small source snapshot, fresh-inserts every child (never
+upsert — a colliding id throws and rolls back the whole batch), and only then
+marks the operation committed. It never writes the source row. Per-child
+`childProgress` (stage + outcome, not a combinatorial enum) lives entirely on
+the operation row. Progress writes also settle an existing child's visible
+processing/error state when first transcription fails or is cancelled. They
+preserve a transcript already saved before interruption and never reinsert a
+deleted child. A failure at automation cannot erase a successful transcript.
+This repository is the persistence piece only; media
+export, actual STT and completion automation belong to other collaborators
+described in `spec/contracts/meeting-splitting.md`.
+
 **Never use raw SQL `WHERE id = ?` with `uuid.uuidString`.**
 GRDB stores UUID values via Codable encoding, which produces a
 representation that is not always equal to `UUID.uuidString`. Use
@@ -162,6 +182,33 @@ singleton row (`lifetime_dictation_stats`) that survives history
 deletion. Increments happen in the same transaction as the
 dictation save (issue #124). If you add a stat, add it to that row,
 the migration for the column, and the `resetLifetimeStats()` path.
+
+**The sharing ledger is deliberately not cascaded from its source.**
+`share_publications.transcriptionId` uses `ON DELETE SET NULL`, never
+`CASCADE` — a deleted transcription must never silently drop a share's
+revocation authority. Deleting a source with active shares must go through
+`SharePublicationRepository.detachAndEnqueueTerminalOperations(transcriptionId:in:)`
+inside the same write transaction that deletes the source row: it clears
+every content-derived local field and enqueues exactly one terminal `delete`
+outbox operation per non-complete share, doing no network I/O itself.
+`share_outbox_operations` rows do cascade from `share_publications` — that
+parent is the local ledger row, not the transcription. `ShareCoordinator`
+drives every confirmed-vs-pending distinction from a service receipt, never
+by inferring it locally, and processes each share's outbox in strict
+`sequence` order so a queued terminal delete is never applied ahead of a
+still-uncertain create.
+
+Confirmed receipts and operation completion share one transaction. Outbox
+requests retain their exact encoded bytes and original ETag across restarts.
+Selection manifests and deterministic digests become current only with the
+matching confirmed revision. Detachment clears those fields in pending work
+too; an uncertain create keeps its ciphertext-only request until it can be
+reconciled and stopped. Recovered rows use a nullable locator and cannot
+reconstruct a URL or update content. A source existence check inside publication
+creation prevents a stale draft from publishing after its source was deleted.
+An atomic first-attempt marker distinguishes a definitively rejected initial
+create from a retry after an uncertain response; only the former can be
+discarded, and never by cascading a separately queued terminal stop.
 
 ## How to verify a change
 
