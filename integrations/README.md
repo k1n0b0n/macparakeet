@@ -244,9 +244,11 @@ macparakeet-cli transcribe /path/to/interview.mp3 --format dapt --output-dir .
 A single input without `--output-dir` prints the selected document to stdout,
 so you can also redirect it:
 `macparakeet-cli transcribe interview.mp3 --format dapt > interview.dapt.xml`.
-DAPT preserves word timing and speaker attribution when they are aligned with
-the transcript. Current display labels become character aliases; if the
-optional label roster is incomplete, stored anonymous IDs such as `S2` remain
+DAPT preserves automatic word timing and speaker attribution when they are
+aligned with the transcript. A corrected or merged timed line is emitted once
+for its preserved segment envelope; its rewritten words are not assigned the
+automatic per-word timestamps. Current display labels become character aliases.
+If the optional label roster is incomplete, stored anonymous IDs such as `S2` remain
 anonymous aliases. If diarization is off or unavailable, DAPT omits character
 agents; if word timing is unavailable, it emits a valid untimed original
 transcript rather than inventing timing or attribution.
@@ -610,7 +612,84 @@ macparakeet-cli meetings results add <id> \
   --content "Decision: ship the parser" \
   --json
 macparakeet-cli meetings export <id> --format md --stdout
+
+# Timed transcript corrections use the revision from the last JSON read.
+macparakeet-cli meetings corrections edit-line <id> \
+  --segment <segment-uuid> --text "Corrected line." --expected-revision 0 --json
+macparakeet-cli meetings corrections merge-lines <id> \
+  --segment <first-uuid> --segment <second-uuid> --expected-revision 1 --json
+macparakeet-cli meetings corrections undo <id> --expected-revision 2 --json
 ```
+
+The two meeting transcript JSON views expose the effective corrected text and
+segments. `transcriptTextAlignment` is `automatic`, `segment`, or `untimed`;
+rows without automatic word timestamps are `untimed`. `textCorrectionsApplied`
+tells an agent whether timed text/boundary corrections
+are active. A segment may include `isTextEdited: true`. Keep treating the
+separate `wordTimestamps` array as automatic recognition evidence: under
+`segment` alignment it is not a word-by-word timing map for corrected text.
+One-to-one text edits retain the durable segment UUID. Structural edits include
+`anchorTranscriptSegmentIDs` so an agent can trace the effective line to its
+automatic sources. Correction writes require the latest
+`speakerCorrectionRevision`; stale writes fail instead of overwriting another
+app or agent's work.
+
+Import one historical audio or video file as a normal managed meeting. The
+source remains unchanged; progress goes to stderr and the final record goes to
+stdout. A `partial` result is usable and exits zero. A `needsRetry` result has
+already saved its meeting and audio, so open that meeting and retry
+transcription rather than importing again:
+
+```bash
+macparakeet-cli meetings import ~/Downloads/partnership.m4a \
+  --title "Partnership discussion" \
+  --started-at 2026-05-14 \
+  --json
+```
+
+Split a saved recording that spans multiple meetings. Every resulting part,
+including the first, is a brand-new saved meeting that receives its own first
+transcription and normal enabled completion automation, including summaries
+and best-effort knowledge-card generation; the
+original recording is never modified, retranscribed, or deleted:
+
+```bash
+macparakeet-cli meetings split preview <meeting> --cut 1800000 --json
+macparakeet-cli meetings split create <meeting> \
+  --cut 1800000 \
+  --title "Standup: Part 1" \
+  --title "Standup: Part 2" \
+  --json
+macparakeet-cli meetings split status <operation-id> --json
+macparakeet-cli meetings split status --source <meeting> --json
+macparakeet-cli meetings split resume <operation-id> --json
+macparakeet-cli meetings split discard <operation-id> --json
+```
+
+`preview` performs no writes. `create` publishes the audio parts and
+processes them sequentially in one call; it is safe to repeat with identical
+arguments after an interruption at any point — the same parts and progress
+are reused, never duplicated — and accepts `--dry-run` to print the preview
+instead. Every `--title` must contain non-whitespace text. Both `create` and
+`status --source` accept an exact source UUID even
+after that recording has been deleted, for retrying/discovering a committed
+split. `status --source` finds every split operation recorded for a meeting,
+which matters if a process died before returning an operation id. `resume`
+retries only unfinished/failed parts without recreating audio and only
+accepts a committed operation; if it never finished creating, rerun `create`
+with the original arguments instead. `discard` abandons a not-yet-published
+operation and is refused once audio has committed; a discarded operation's
+`--key` is a permanent tombstone, so retrying needs a fresh `--key`. A
+completed operation with any failed part still prints its full result, then
+exits non-zero. Ctrl-C during `create`/`resume` finishes settling in-flight
+work (completed stages are kept) before exiting `130`. Preview's
+`hasRawMicrophone`/`hasRawSystem`/`hasCleanedMicrophone` describe whether
+that track will actually be exported — both the file and usable alignment
+metadata are required — not merely whether the file exists; missing or
+corrupt metadata never blocks splitting, every part still gets full
+canonical playback audio. This CLI slice follows the shared saved
+speech-engine and meeting speaker-detection preferences rather than exposing
+per-invocation engine/model override flags.
 
 Manage local meeting classification and assign it atomically:
 

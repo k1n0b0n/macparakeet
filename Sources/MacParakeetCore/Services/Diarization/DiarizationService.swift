@@ -434,7 +434,7 @@ public actor DiarizationService: DiarizationServiceProtocol {
     /// so it takes FluidAudio's slower high-accuracy settings rather than
     /// `OfflineDiarizerConfig.default` (the fast preset). FluidAudio's
     /// 0.15.4-era VoxConverse table (collar 0.25 s, overlap ignored; not yet
-    /// re-run under 0.15.6) put `stepRatio 0.1` / `minSegmentDuration 0` at
+    /// re-run under 0.15.7) put `stepRatio 0.1` / `minSegmentDuration 0` at
     /// 13.89% versus 15.07% DER for about half the throughput. See ADR-010
     /// (2026-09-06 amendment) and issue #972.
     ///
@@ -442,7 +442,9 @@ public actor DiarizationService: DiarizationServiceProtocol {
     /// never tuned it, and 0.15.6 changed its semantics to a plain distance
     /// cut), `clustering.constrainedAssignment` (on since 0.15.6), and the
     /// K-Means re-clustering seed, which FluidAudio fixes at `baseSeed 0` with
-    /// `nInit 10` so constrained runs are deterministic.
+    /// `nInit 10` so constrained runs are deterministic. 0.15.7 holds Exact /
+    /// max speaker caps against both the argmax and π cluster censuses
+    /// (FluidAudio #891); unconstrained clustering is unchanged.
     public nonisolated static var highAccuracyConfig: OfflineDiarizerConfig {
         var config = OfflineDiarizerConfig.default
         // 10 s windows with a 1 s hop instead of 2 s: more embeddings per
@@ -465,7 +467,7 @@ public actor DiarizationService: DiarizationServiceProtocol {
 
     /// Bump on any FluidAudio upgrade that could move the clustering centroid,
     /// even when the embedding model is untouched.
-    private nonisolated static let pipelineRevision = "fluidaudio-0.15.6"
+    private nonisolated static let pipelineRevision = "fluidaudio-0.15.7"
 
     /// Identity of the representation the shipping configuration produces.
     nonisolated static var defaultModelIdentity: SpeakerModelIdentity {

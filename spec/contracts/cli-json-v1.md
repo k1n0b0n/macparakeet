@@ -62,6 +62,12 @@ with human progress/status kept off stdout.
   `Transcription` object. It is zero-based and non-null only when a local-file
   audio stream was selected explicitly; this additive field does not change
   stdout/stderr or envelope shapes.
+- Transcription-shaped JSON payloads include nullable `splitProvenance`. It is
+  non-null only for a saved child created by Split and transcribe, with
+  `operationId`, `sourceId`, the snapshotted `sourceTitle`, approved
+  `approvedStartMs`/`approvedEndMs`, zero-based `ordinal`, and ISO-8601
+  `splitCreatedAt`. The provenance is historical and remains valid when the
+  source row, operation receipt, or a sibling is later deleted.
 - `cards list --json` returns an array; `--ndjson` returns the same card objects
   one compact object per line. Each object has exactly `transcriptionId`,
   `title`, `date`, nullable `durationMs`, `source`, nullable `attendees`, the
@@ -192,8 +198,13 @@ with human progress/status kept off stdout.
   `transcriptSegments` when the meeting row has durable segments. Each segment
   contains `id`, `startMs`, `endMs`, `speakerId`, `speakerLabel`, `text`, and
   `wordRange.startIndex` / `wordRange.endIndexExclusive` into the same payload's
-  `wordTimestamps` array. Callers that need stable citations should prefer
-  these persisted segments over re-segmenting words.
+  `wordTimestamps` array. Effective corrected segments may additionally contain
+  `isTextEdited: true`; omission means no text/boundary correction is claimed
+  for that segment. A one-to-one text correction retains the durable segment
+  `id`. A structurally split or merged effective segment receives a deterministic
+  effective `id` and includes `anchorTranscriptSegmentIDs` containing the
+  durable source IDs. Callers that need stable citations should prefer these
+  segments over re-segmenting words.
 - Since CLI 4.0.0, `export --stdout --format txt` uses the same formatted output as TXT file
   export, with default metadata, timestamps, and speaker labels. JSON transcript
   text fields remain available for callers needing bare stored text. TXT/Markdown
@@ -201,13 +212,36 @@ with human progress/status kept off stdout.
   paragraphs may be headed `Unassigned`. CLI 3.x returned bare stored text on
   this path; callers needing that content can select `cleanTranscript` with a
   `rawTranscript` fallback from JSON. This does not change JSON schema version 1.
-- `prompts run` sends rich timestamped speaker context when timings exist;
-  edited transcripts and untimed recordings use the stored-text fallback.
+- `prompts run` sends rich timestamped speaker context when honest automatic or
+  segment timing exists. A corrected line uses its complete segment envelope;
+  legacy whole-text edits and untimed recordings use the stored-text fallback.
 - `export --format json`, `meetings show --json`, `meetings transcript
   --format json`, and `meetings export --stdout --format json` expose the
   effective speaker attribution. They include additive
   `speakerCorrectionsApplied` and `speakerCorrectionRevision` fields; revision
-  `0` with `false` means the automatic baseline is active.
+  `0` with `false` means the automatic baseline is active. The legacy
+  `speakerCorrectionsApplied` name reports any active entry in the shared
+  speaker/transcript correction journal, including text-only corrections; it
+  does not assert that a speaker identity changed. Use `textCorrectionsApplied`
+  for the independent timed-text/boundary signal.
+- `meetings show --json` and `meetings transcript --format json` additionally
+  include `textCorrectionsApplied` and `transcriptTextAlignment`. Alignment is
+  `automatic`, `segment`, or `untimed`; `automatic` requires present automatic
+  word timestamps, `segment` means rewritten text is timed only to segment
+  envelopes, and `untimed` covers rows without word timestamps plus legacy
+  whole-text edits. The same payload's `wordTimestamps` retain the
+  automatic recognized text and timing as immutable evidence, so consumers
+  must not substitute them for corrected-word timing.
+- `meetings corrections edit-line|merge-lines|undo|redo|reset` mutates the
+  same reversible correction journal as the app. Every command requires
+  `--expected-revision` from the last transcript read; edit/merge target current
+  segment UUIDs from `meetings transcript --format json`. A stale revision or
+  segment is rejected without advancing history. JSON success output is the
+  updated `MeetingTranscriptRecord`, including the new revision and effective
+  projection. JSON failures use `conflict` for a stale expected revision,
+  `validation` for stale/unsupported segment targets and correction commands,
+  and `input_empty` for blank replacement text. Conflict exits `1`; validation
+  and empty-input misuse exit `2`.
 - `meetings show --json` meeting objects can include optional `startContext`
   for meeting rows. When present it contains `triggerKind`, `sourceMode`, and
   optional `frontmostApplication` (`bundleIdentifier`, `localizedName`).
@@ -231,6 +265,18 @@ with human progress/status kept off stdout.
   Multiple repeated filters use ANY semantics. `--unclassified` cannot be
   combined with `--type`. Archived types/labels remain resolvable for meetings
   that already use them but are excluded from default vocabulary lists.
+
+- `meetings import <path> --json` returns one camelCase `MeetingImportRecord`:
+  `id`, `completion` (`completed`, `partial`, or `needsRetry`), persisted
+  `status`, `title`, historical `startedAt`, nullable `durationMs`, nullable
+  `managedAudioPath`, and `warnings`. Warning objects contain stable `kind`
+  and plain-language `message`, plus nullable `promptId` and `promptName` for
+  a failed enabled prompt. Progress is stderr-only. Complete and partial
+  records exit 0. A `needsRetry` record is printed first, then the command
+  exits 1 without a failure envelope; if SIGINT caused the stopped result, the
+  same record is printed before exit 130. Callers must open that saved meeting
+  and retry transcription instead of importing the source again. Date-only
+  `--started-at` is local midnight; ISO-8601 timestamps preserve their instant.
 - `meetings show --json` and `meetings export --stdout --format json` may
   include `calendarEventSnapshot` for meeting recordings started from, or
   probably overlapping, a calendar event. The field is additive and local-only;
@@ -270,6 +316,29 @@ with human progress/status kept off stdout.
   restore-deleted`, `prompts collections`, `meetings types`, `meetings labels`,
   `meetings classify`, and meeting list classification filters. Classification
   names and prompt content are local user data and never become telemetry dimensions.
+
+## Split operation payloads
+
+`meetings split preview --json` (and `create --dry-run --json`) returns
+`sourceId`, `sourceTitle`, `totalDurationMs`, ordered `ranges` with `startMs`
+and `endMs`, track-presence Booleans, and an opaque `sourceIdentity` string.
+Pass that string unchanged to `create --expected-identity`. Preview, dry-run
+and status use a read-only database connection without migrations.
+
+`create`, `resume`, `discard`, and `status` return a `MeetingSplitOperation`;
+`status --source` returns an array. Its `id`, `idempotencyKey`, `sourceId`,
+frozen `request`, ordered `childIds`, `status`, timestamps and `childProgress`
+describe durable creation and processing separately. Progress entries carry
+`childId`, `stage`, `outcome`, optional `errorMessage`, and `updatedAt`.
+Operation `committed` means all recordings were saved, not that transcription
+succeeded. Any failed child causes exit 1 after emitting the complete receipt,
+without a second failure envelope. Deleted children may remain in the
+historical receipt and are never recreated.
+
+See [Split and transcribe](meeting-splitting.md) for stage values, ownership,
+retry and original-preservation semantics. These are additive v1 commands;
+progress stays on stderr. The default creation key uses canonical sorted JSON
+so identical source/cuts/titles remain idempotent across CLI processes.
 
 ## Failure Envelope
 

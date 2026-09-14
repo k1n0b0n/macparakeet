@@ -35,11 +35,17 @@ Each contract document should include:
 
 ## Current Contracts
 
+- [Meeting Import v1](meeting-import-v1.md) — one-file app/CLI import, managed-media ownership, recovery, and durable results
+- [Split and Transcribe](meeting-splitting.md) — implemented shared Core, native app, and public CLI lifecycle
+- [Saved-Audio Auto-Prompt Completion](saved-audio-auto-prompt-completion.md)
+
 - [Meeting Artifacts v1](meeting-artifacts-v1.md)
 - [Meeting Recovery and Retention Safety](meeting-recovery-retention.md)
 - [CLI JSON v1](cli-json-v1.md)
 - [DAPT Export v1](dapt-export-v1.md)
 - [File Transcription Audio Tracks](file-transcription-audio-tracks.md)
 - [Custom Word Deletion](custom-word-deletion.md)
-- [Speaker Correction Submission](speaker-correction-view-model.md)
+- [Transcript Correction Submission](speaker-correction-view-model.md)
 - [Telemetry and Diagnostic Evidence](telemetry-v1.md)
+- [Share Link and Bundle v1](share-link-bundle-v1.md)
+- [Share Service v1](share-service-v1.md)

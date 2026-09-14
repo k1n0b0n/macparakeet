@@ -900,10 +900,7 @@ final class TranscriptionViewModelTests: XCTestCase {
         defaults.set(false, forKey: UserDefaultsAppRuntimePreferences.saveMeetingAudioKey)
         viewModel = TranscriptionViewModel(defaults: defaults)
 
-        try AppPaths.ensureDirectories()
-        let folder = URL(fileURLWithPath: AppPaths.meetingRecordingsDir, isDirectory: true)
-            .appendingPathComponent("vm-meeting-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let folder = try makeTemporaryManagedMeetingFolder()
         let audioURL = folder.appendingPathComponent("meeting-playback.m4a")
         let notesURL = folder.appendingPathComponent("notes.md")
         XCTAssertTrue(FileManager.default.createFile(atPath: audioURL.path, contents: Data("audio".utf8)))
@@ -1007,10 +1004,7 @@ final class TranscriptionViewModelTests: XCTestCase {
         defaults.set(false, forKey: UserDefaultsAppRuntimePreferences.saveMeetingAudioKey)
         viewModel = TranscriptionViewModel(defaults: defaults)
 
-        try AppPaths.ensureDirectories()
-        let folder = URL(fileURLWithPath: AppPaths.meetingRecordingsDir, isDirectory: true)
-            .appendingPathComponent("vm-recovered-meeting-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let folder = try makeTemporaryManagedMeetingFolder()
         let audioURL = folder.appendingPathComponent("meeting-playback.m4a")
         XCTAssertTrue(FileManager.default.createFile(atPath: audioURL.path, contents: Data("audio".utf8)))
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -1600,6 +1594,59 @@ final class TranscriptionViewModelTests: XCTestCase {
 
         XCTAssertFalse(saved)
         XCTAssertNil(viewModel.currentTranscription?.cleanTranscript)
+    }
+
+    func testUpdateCurrentTranscriptTextRejectsTimedCorrectionProjection() {
+        let words = [
+            WordTimestamp(word: "Original", startMs: 0, endMs: 400, confidence: 0.99),
+            WordTimestamp(word: "words", startMs: 450, endMs: 800, confidence: 0.98),
+        ]
+        let segment = TranscriptSegmentRecord(
+            startMs: 0,
+            endMs: 800,
+            speakerId: nil,
+            speakerLabel: "Unassigned",
+            text: "Corrected line",
+            wordRange: .init(startIndex: 0, endIndexExclusive: 2),
+            isTextEdited: true
+        )
+        let transcription = Transcription(
+            fileName: "timed.mp3",
+            rawTranscript: "Original words",
+            cleanTranscript: "Corrected line",
+            wordTimestamps: words,
+            transcriptSegments: [segment],
+            status: .completed
+        )
+        mockRepo.transcriptions = [transcription]
+        viewModel.configure(transcriptionService: mockService, transcriptionRepo: mockRepo)
+        viewModel.currentTranscription = transcription
+
+        XCTAssertFalse(viewModel.updateCurrentTranscriptText(to: "Competing whole-text edit"))
+        XCTAssertEqual(viewModel.currentTranscription?.cleanTranscript, "Corrected line")
+        XCTAssertFalse(viewModel.currentTranscription?.isTranscriptEdited ?? true)
+        XCTAssertEqual(try? mockRepo.fetch(id: transcription.id)?.cleanTranscript, "Corrected line")
+    }
+
+    func testUpdateCurrentTranscriptTextAllowsExistingLegacyTimedEdit() {
+        let transcription = Transcription(
+            fileName: "legacy-timed.mp3",
+            rawTranscript: "Original words",
+            cleanTranscript: "Earlier whole-text edit",
+            wordTimestamps: [
+                WordTimestamp(word: "Original", startMs: 0, endMs: 400, confidence: 0.99),
+                WordTimestamp(word: "words", startMs: 450, endMs: 800, confidence: 0.98),
+            ],
+            status: .completed,
+            isTranscriptEdited: true
+        )
+        mockRepo.transcriptions = [transcription]
+        viewModel.configure(transcriptionService: mockService, transcriptionRepo: mockRepo)
+        viewModel.currentTranscription = transcription
+
+        XCTAssertTrue(viewModel.updateCurrentTranscriptText(to: "Updated legacy edit"))
+        XCTAssertEqual(viewModel.currentTranscription?.cleanTranscript, "Updated legacy edit")
+        XCTAssertTrue(viewModel.currentTranscription?.isTranscriptEdited ?? false)
     }
 
     func testUpdateCurrentTranscriptTextKeepsStateWhenSaveFails() {

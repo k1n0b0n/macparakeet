@@ -181,6 +181,7 @@ public final class TranscriptionLibraryViewModel {
     public var searchText: String = "" { didSet { debounceSearchReload() } }
     public var sortOrder: LibrarySortOrder = .dateDescending { didSet { reloadAfterStateChange() } }
     public private(set) var filteredTranscriptions: [Transcription] = []
+    private var effectiveTranscriptTextByID: [UUID: String] = [:]
     public private(set) var groupedTranscriptions: [(group: TranscriptionDateGroup, items: [Transcription])] = []
     public private(set) var hasMore = false
     public private(set) var isLoading = false
@@ -211,6 +212,10 @@ public final class TranscriptionLibraryViewModel {
 
     public var displayedSourceLabelStyle: LibrarySourceLabelStyle {
         scope.sourceLabelStyle(for: displayedFilter)
+    }
+
+    public func effectiveTranscriptText(for transcription: Transcription) -> String? {
+        effectiveTranscriptTextByID[transcription.id]
     }
 
     public init(scope: TranscriptionLibraryScope = .all) {
@@ -578,8 +583,8 @@ public final class TranscriptionLibraryViewModel {
     public func deleteTranscription(_ transcription: Transcription) {
         do {
             errorMessage = nil
-            try TranscriptionDeletionCleanup.removeOwnedAssets(for: transcription)
-            let deleted = try transcriptionRepo?.delete(id: transcription.id) ?? false
+            guard let repo = transcriptionRepo else { return }
+            let deleted = try TranscriptionDeletionCoordinator.delete(transcription, repository: repo)
             guard deleted else { return }
             transcriptions.removeAll { $0.id == transcription.id }
             selectedTranscriptionIDs.remove(transcription.id)
@@ -698,7 +703,12 @@ public final class TranscriptionLibraryViewModel {
         }
         query.limit = limit ?? max(pageSize, transcriptions.count)
         let page = try repo.fetchLibraryPage(query: query)
-        publishLoadedItems(page.items, hasMore: page.hasMore, filter: filter)
+        publishLoadedItems(
+            page.items,
+            hasMore: page.hasMore,
+            filter: filter,
+            effectiveTranscriptTextByID: page.effectiveTranscriptTextByID
+        )
     }
 
     private func refreshLoadedTranscription(id: UUID) throws {
@@ -710,12 +720,19 @@ public final class TranscriptionLibraryViewModel {
         if loadTask != nil {
             cancelActiveLoad()
         }
-        guard let refreshed = try repo.fetch(id: id) else {
+        guard let refreshed = try repo.fetchLibraryItem(id: id) else {
             removeLoadedTranscriptions(withIDs: [id])
             return
         }
-        transcriptions[index] = refreshed
-        publishLoadedItems(transcriptions, hasMore: hasMore, filter: displayedFilter)
+        transcriptions[index] = refreshed.transcription
+        var updatedEffectiveText = effectiveTranscriptTextByID
+        updatedEffectiveText[id] = refreshed.effectiveTranscriptText
+        publishLoadedItems(
+            transcriptions,
+            hasMore: hasMore,
+            filter: displayedFilter,
+            effectiveTranscriptTextByID: updatedEffectiveText
+        )
     }
 
     private func cancelActiveLoad() {
@@ -768,7 +785,14 @@ public final class TranscriptionLibraryViewModel {
                 }.value
                 guard let self, !Task.isCancelled, self.loadGeneration == generation else { return }
                 let items = append ? self.transcriptions + page.items : page.items
-                self.publishLoadedItems(items, hasMore: page.hasMore, filter: requestedFilter)
+                var effectiveTranscriptTextByID = append ? self.effectiveTranscriptTextByID : [:]
+                effectiveTranscriptTextByID.merge(page.effectiveTranscriptTextByID) { _, new in new }
+                self.publishLoadedItems(
+                    items,
+                    hasMore: page.hasMore,
+                    filter: requestedFilter,
+                    effectiveTranscriptTextByID: effectiveTranscriptTextByID
+                )
                 self.isLoading = false
             } catch {
                 guard let self, !Task.isCancelled, self.loadGeneration == generation else { return }
@@ -834,8 +858,12 @@ public final class TranscriptionLibraryViewModel {
     private func publishLoadedItems(
         _ items: [Transcription],
         hasMore: Bool,
-        filter: LibraryFilter
+        filter: LibraryFilter,
+        effectiveTranscriptTextByID updatedEffectiveText: [UUID: String]? = nil
     ) {
+        let itemIDs = Set(items.map(\.id))
+        effectiveTranscriptTextByID = (updatedEffectiveText ?? effectiveTranscriptTextByID)
+            .filter { itemIDs.contains($0.key) }
         transcriptions = items
         filteredTranscriptions = items
         groupedTranscriptions = groupByDate(items)
@@ -910,8 +938,7 @@ public final class TranscriptionLibraryViewModel {
 
         for target in targets {
             do {
-                try TranscriptionDeletionCleanup.removeOwnedAssets(for: target)
-                if try repo.delete(id: target.id) {
+                if try TranscriptionDeletionCoordinator.delete(target, repository: repo) {
                     succeededIDs.append(target.id)
                 } else {
                     failedIDs.append(target.id)

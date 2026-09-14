@@ -29,9 +29,10 @@ let packageDependencies: [Package.Dependency] = [
     // diarization on CoreML/ANE. Pinned exact: the STT engines depend on the
     // registry's model file names and the ModelHub download API, and the
     // diarizer's clustering semantics changed between minor releases
-    // (0.15.5 and 0.15.6, see ADR-010). Bump deliberately with an STT
-    // regression pass and a diarization before/after comparison.
-    .package(url: "https://github.com/FluidInference/FluidAudio", exact: "0.15.6"),
+    // (0.15.5 / 0.15.6 clustering, 0.15.7 speaker-cap dual-census / FluidAudio
+    // #891; see ADR-010). Bump deliberately with an STT regression pass and a
+    // diarization before/after comparison.
+    .package(url: "https://github.com/FluidInference/FluidAudio", exact: "0.15.7"),
     // ArgumentParser for CLI
     .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
     // Sparkle for auto-updates (non-App Store distribution)

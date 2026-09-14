@@ -892,6 +892,10 @@ final class MeetingRecordingServiceTests: XCTestCase {
         let log = try String(contentsOf: AudioCaptureDiagnostics.diagnosticLogURL(), encoding: .utf8)
         XCTAssertTrue(log.contains("meeting_recording_health session=\(output.sessionID.uuidString)"))
         XCTAssertTrue(log.contains("source_mode=microphone_and_system"))
+        let healthLine = try XCTUnwrap(
+            log.split(separator: "\n").last { $0.contains("meeting_recording_health session=\(output.sessionID.uuidString)") }
+        )
+        XCTAssertTrue(healthLine.contains("capture_start_completed=true"))
         XCTAssertTrue(log.contains("mic_started=true"))
         XCTAssertTrue(log.contains("requested_mic_mode=raw"))
         XCTAssertTrue(log.contains("effective_mic_mode=raw"))

@@ -1,5 +1,17 @@
 # CLI Testing Guide
 
+For saved-meeting splitting, run `swift test --filter 'MeetingSplit|SpecCommandTests'`.
+For external meeting import, run
+`swift test --filter 'MeetingImport|AudioFileConverterTests|SpecCommandTests'`.
+The tests use synthetic temporary audio and databases, not personal recordings.
+Check `meetings split --help`, `meetings import --help`, and `spec --json` for
+discovery. Split preview and `create --dry-run` must not initialize models,
+migrate the database, or write preferences. A split `committed` operation means
+audio was published; inspect each child's progress and exit status for processing
+success. Import progress belongs on stderr; stdout carries one final result.
+`partial` is usable and exits zero, while `needsRetry` prints the saved meeting
+before exiting one so verification does not create a duplicate by importing again.
+
 > Status: **ACTIVE** - CLI testing guide for core services
 
 Use `macparakeet-cli` for fast, repeatable testing of core transcription and text-processing flows.
@@ -300,10 +312,12 @@ media URLs and podcast search/URL inputs.
 `rawTranscript`. Status and progress messages stay on stderr, so stdout can be
 piped directly into `pbcopy`, `grep`, `tee`, or a local LLM command.
 
-`--format dapt` uses the shared DAPT renderer. Aligned word timing and speaker
-IDs become timed script events and character agents; current display labels are
-used when available, otherwise the stored anonymous ID remains the alias.
-Missing diarization or timing is omitted rather than synthesized.
+`--format dapt` uses the shared DAPT renderer. Automatic aligned word timing and
+speaker IDs become timed script events and character agents. A corrected line
+becomes one event for its preserved segment envelope; its rewritten words do
+not inherit automatic per-word timing. Current display labels are used when
+available, otherwise the stored anonymous ID remains the alias. Missing honest
+alignment or diarization is omitted rather than synthesized.
 
 `--no-history` uses the same transcription pipeline without retaining a completed
 history row. For media URL inputs, downloaded audio is temporary regardless of
@@ -367,7 +381,10 @@ swift run macparakeet-cli export <ID> --format srt --stdout
 swift run macparakeet-cli export <ID> --format dapt --stdout
 ```
 
-If `--output` is omitted, the file is written to the current directory with an auto-generated name. DAPT uses the compound `.dapt.xml` extension. It carries aligned timing and optional speaker characters when present, and remains valid without either.
+If `--output` is omitted, the file is written to the current directory with an
+auto-generated name. DAPT uses the compound `.dapt.xml` extension. It carries
+automatic word timing or corrected segment-envelope timing and optional speaker
+characters when present, and remains valid without either.
 
 **Note:** PDF and DOCX export require AppKit and are only available in the GUI.
 

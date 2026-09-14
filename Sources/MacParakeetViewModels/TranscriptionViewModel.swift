@@ -264,18 +264,48 @@ public final class TranscriptionViewModel {
     public private(set) var canUndoSpeakerCorrection = false
     public private(set) var canRedoSpeakerCorrection = false
     public private(set) var isApplyingSpeakerCorrection = false
+
+    private struct EffectiveTranscriptionCacheKey: Equatable {
+        let transcriptionRevision: UInt64
+        let attributionTranscriptionID: UUID?
+        let attributionFingerprint: TranscriptFingerprint?
+        let correctionRevision: Int?
+        let correctionsApplied: Bool
+    }
+
+    @ObservationIgnored
+    private var effectiveTranscriptionCache: (
+        key: EffectiveTranscriptionCacheKey,
+        value: Transcription?
+    )?
+
     public var effectiveCurrentTranscription: Transcription? {
-        guard let currentTranscription,
-              speakerAttributionTranscriptionID == currentTranscription.id,
-              let speakerAttribution
-        else {
-            return currentTranscription
-        }
-        return SpeakerAttributionProjection(
-            automaticTranscription: currentTranscription,
-            attribution: speakerAttribution,
+        let key = EffectiveTranscriptionCacheKey(
+            transcriptionRevision: currentTranscriptionRevision,
+            attributionTranscriptionID: speakerAttributionTranscriptionID,
+            attributionFingerprint: speakerAttribution?.fingerprint,
+            correctionRevision: speakerAttribution?.correctionRevision,
             correctionsApplied: speakerCorrectionsApplied
-        ).effectiveTranscription
+        )
+        if let effectiveTranscriptionCache, effectiveTranscriptionCache.key == key {
+            return effectiveTranscriptionCache.value
+        }
+
+        let value: Transcription?
+        if let currentTranscription,
+           speakerAttributionTranscriptionID == currentTranscription.id,
+           let speakerAttribution
+        {
+            value = SpeakerAttributionProjection(
+                automaticTranscription: currentTranscription,
+                attribution: speakerAttribution,
+                correctionsApplied: speakerCorrectionsApplied
+            ).effectiveTranscription
+        } else {
+            value = currentTranscription
+        }
+        effectiveTranscriptionCache = (key, value)
+        return value
     }
 
     public func handlePromptResultDeleted(_ deletedID: UUID) {
@@ -1188,8 +1218,7 @@ public final class TranscriptionViewModel {
         }
 
         do {
-            try TranscriptionDeletionCleanup.removeOwnedAssets(for: transcription)
-            let deleted = try repo.delete(id: transcription.id)
+            let deleted = try TranscriptionDeletionCoordinator.delete(transcription, repository: repo)
             guard deleted else { return }
             Telemetry.send(.transcriptionDeleted)
             if currentTranscription?.id == transcription.id {
@@ -1868,6 +1897,10 @@ public final class TranscriptionViewModel {
     @discardableResult
     public func updateCurrentTranscriptText(to newText: String) -> Bool {
         guard var transcription = currentTranscription else { return false }
+        guard !transcription.hasWordTimestamps || transcription.isTranscriptEdited else {
+            setError(message: "Edit timed transcripts one line at a time.")
+            return false
+        }
         guard let repo = transcriptionRepo else {
             reportMissingConfiguration("transcriptionRepo", action: "updateCurrentTranscriptText")
             return false
@@ -1998,6 +2031,13 @@ public final class TranscriptionViewModel {
         }
     }
 
+    private struct SpeakerCorrectionSubmission: Sendable {
+        let transcriptionID: UUID
+        let service: SpeakerCorrectionServicing
+        let attribution: EffectiveSpeakerAttribution
+        let selectedRevision: UInt64
+    }
+
     /// Returns `false` when the correction was refused because speaker changes
     /// are still loading or saving, so the caller can keep its pending input
     /// and retry once `isApplyingSpeakerCorrection` clears.
@@ -2010,33 +2050,65 @@ public final class TranscriptionViewModel {
         _ command: SpeakerCorrectionCommand,
         onCommitted: (@MainActor @Sendable (Bool) -> Void)? = nil
     ) -> Bool {
-        guard let transcriptionID = currentTranscription?.id,
-              let speakerCorrectionService
-        else { return true }
-        guard let attribution = speakerAttribution, !isApplyingSpeakerCorrection else {
-            setError(message: "Speaker changes are still loading or saving. Please try again.")
-            return false
-        }
-        isApplyingSpeakerCorrection = true
-        let selectedRevision = currentTranscriptionRevision
-        Task { [weak self, speakerCorrectionService] in
-            do {
-                let result = try await speakerCorrectionService.apply(
-                    transcriptionId: transcriptionID,
-                    command: command,
-                    expectedFingerprint: attribution.fingerprint,
-                    expectedRevision: attribution.correctionRevision
-                )
-                self?.publishSpeakerCorrectionResult(
-                    result, transcriptionID: transcriptionID, selectedRevision: selectedRevision
-                )
-                await MainActor.run { onCommitted?(true) }
-            } catch {
-                self?.handleSpeakerCorrectionFailure(error, transcriptionID: transcriptionID)
-                await MainActor.run { onCommitted?(false) }
-            }
+        // No transcript or no correction service means there is nothing to
+        // write and nothing to retry, so the command counts as accepted.
+        guard currentTranscription?.id != nil, speakerCorrectionService != nil else { return true }
+        guard let submission = beginSpeakerCorrectionSubmission() else { return false }
+        Task { [weak self] in
+            let committed = await self?.persistSpeakerCorrection(command, submission: submission) ?? false
+            await MainActor.run { onCommitted?(committed) }
         }
         return true
+    }
+
+    /// Applies a correction and returns only after the journal write succeeds
+    /// or fails. Editors await this method so dismissal follows persistence.
+    @discardableResult
+    public func applySpeakerCorrectionAndWait(_ command: SpeakerCorrectionCommand) async -> Bool {
+        guard let submission = beginSpeakerCorrectionSubmission() else { return false }
+        return await persistSpeakerCorrection(command, submission: submission)
+    }
+
+    private func beginSpeakerCorrectionSubmission() -> SpeakerCorrectionSubmission? {
+        guard let transcriptionID = currentTranscription?.id,
+              let speakerCorrectionService
+        else {
+            return nil
+        }
+        guard let attribution = speakerAttribution, !isApplyingSpeakerCorrection else {
+            setError(message: "Speaker changes are still loading or saving. Please try again.")
+            return nil
+        }
+        isApplyingSpeakerCorrection = true
+        return SpeakerCorrectionSubmission(
+            transcriptionID: transcriptionID,
+            service: speakerCorrectionService,
+            attribution: attribution,
+            selectedRevision: currentTranscriptionRevision
+        )
+    }
+
+    private func persistSpeakerCorrection(
+        _ command: SpeakerCorrectionCommand,
+        submission: SpeakerCorrectionSubmission
+    ) async -> Bool {
+        do {
+            let result = try await submission.service.apply(
+                transcriptionId: submission.transcriptionID,
+                command: command,
+                expectedFingerprint: submission.attribution.fingerprint,
+                expectedRevision: submission.attribution.correctionRevision
+            )
+            publishSpeakerCorrectionResult(
+                result,
+                transcriptionID: submission.transcriptionID,
+                selectedRevision: submission.selectedRevision
+            )
+            return true
+        } catch {
+            handleSpeakerCorrectionFailure(error, transcriptionID: submission.transcriptionID)
+            return false
+        }
     }
 
     public func undoSpeakerCorrection() {

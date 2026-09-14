@@ -1859,6 +1859,30 @@ final class TranscriptionServiceTests: XCTestCase {
         XCTAssertEqual(try transcriptionRepo.count(), 1)
     }
 
+    func testPrepareImportedMeetingPreservesHistoricalMetadataAndExplicitTitle() async throws {
+        let startedAt = Date(timeIntervalSince1970: 1_650_000_000)
+        let retentionStartedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let recording = try makeOneSourceMeetingRecording(
+            displayName: "Fallback source name",
+            startedAt: startedAt,
+            audioRetentionStartedAt: retentionStartedAt,
+            titleOverride: "Partnership discussion"
+        )
+        defer { try? FileManager.default.removeItem(at: recording.folderURL) }
+
+        let stub = try await service.prepareMeetingTranscription(recording: recording)
+
+        XCTAssertEqual(stub.createdAt, startedAt)
+        XCTAssertEqual(stub.audioRetentionStartedAt, retentionStartedAt)
+        XCTAssertEqual(stub.fileName, "Partnership discussion")
+        XCTAssertEqual(stub.titleOverride, "Partnership discussion")
+        let fetched = try XCTUnwrap(transcriptionRepo.fetch(id: stub.id))
+        XCTAssertEqual(fetched.createdAt, startedAt)
+        XCTAssertEqual(fetched.audioRetentionStartedAt, retentionStartedAt)
+        XCTAssertEqual(fetched.fileName, "Partnership discussion")
+        XCTAssertEqual(fetched.titleOverride, "Partnership discussion")
+    }
+
     func testFinalizeMeetingTranscriptionUpdatesExistingStubWithoutDuplicatingLibraryRow() async throws {
         let recording = try makeOneSourceMeetingRecording(displayName: "Queued Meeting")
         defer { try? FileManager.default.removeItem(at: recording.folderURL) }
@@ -3267,7 +3291,7 @@ final class TranscriptionServiceTests: XCTestCase {
     }
 
     func testRetranscribeExistingFileUpdatesOriginalRowWithoutDuplicate() async throws {
-        let original = Transcription(
+        var original = Transcription(
             id: UUID(),
             createdAt: Date(timeIntervalSince1970: 123),
             fileName: "lecture.mp3",
@@ -3289,6 +3313,7 @@ final class TranscriptionServiceTests: XCTestCase {
             isFavorite: true,
             sourceType: .youtube
         )
+        original.durationMs = 30_000
         try transcriptionRepo.save(original)
         await mockSTT.configure(result: STTResult(
             text: "New transcript",
@@ -3328,6 +3353,8 @@ final class TranscriptionServiceTests: XCTestCase {
         let convertedAudioTrackOrdinal = await mockAudio.lastAudioTrackOrdinal
         XCTAssertEqual(convertedAudioTrackOrdinal, 1)
         XCTAssertEqual(all[0].status, .completed)
+        XCTAssertEqual(result.durationMs, 420, "Ordinary file retranscription keeps its existing duration policy")
+        XCTAssertEqual(all[0].durationMs, 420)
         XCTAssertEqual(all[0].transcriptSegments?.map(\.text), ["New transcript"])
         let indexedText: [String] = try segmentRepo.fetch(transcriptionId: original.id).map(\.text)
         XCTAssertEqual(indexedText, ["New transcript"])
@@ -3452,6 +3479,59 @@ final class TranscriptionServiceTests: XCTestCase {
         let exactDiarizeCalled = await diarization.diarizeCalled
         XCTAssertTrue(exactDiarizeCalled)
         XCTAssertEqual(result.speakers, [SpeakerInfo(id: "S1", label: "Speaker 1")])
+    }
+
+    func testCanonicalMeetingAudioPreservesPlayableDurationIndependentOfWordTimings() async throws {
+        for wordEnd in [nil, 200, 90_000] as [Int?] {
+            var original = Transcription(
+                id: UUID(), fileName: "part.wav", filePath: "/tmp/part.wav",
+                status: .processing, sourceType: .meeting
+            )
+            original.durationMs = 30_000
+            try transcriptionRepo.save(original)
+            let words = wordEnd.map {
+                [TimestampedWord(word: "Fresh", startMs: 0, endMs: $0, confidence: 1)]
+            } ?? []
+            await mockSTT.configure(result: STTResult(text: words.isEmpty ? "" : "Fresh", words: words))
+
+            let result = try await service.retranscribe(
+                existing: original, fileURL: URL(fileURLWithPath: "/tmp/part.wav"), source: .meeting
+            )
+            let persisted = try XCTUnwrap(transcriptionRepo.fetch(id: original.id))
+            XCTAssertEqual(result.durationMs, 30_000, "Audio duration must not follow word extent \(String(describing: wordEnd))")
+            XCTAssertEqual(persisted.durationMs, 30_000)
+            XCTAssertNotNil(persisted.rawTranscript, "Successful silence remains a completed first transcript")
+        }
+    }
+
+    func testCanonicalMeetingAudioUsesMeetingSpeakerPreference() async throws {
+        for meetingEnabled in [true, false] {
+            let original = Transcription(
+                id: UUID(), fileName: "part.wav", filePath: "/tmp/part.wav",
+                status: .processing, sourceType: .meeting
+            )
+            try transcriptionRepo.save(original)
+            await mockSTT.configure(result: STTResult(
+                text: "Fresh", words: [TimestampedWord(word: "Fresh", startMs: 0, endMs: 200, confidence: 1)]
+            ))
+            let diarization = MockDiarizationService()
+            await diarization.configure(result: MacParakeetDiarizationResult(
+                segments: [], speakerCount: 0, speakers: []
+            ))
+            let configuredService = TranscriptionService(
+                audioProcessor: mockAudio, sttTranscriber: mockSTT,
+                transcriptionRepo: transcriptionRepo,
+                shouldDiarize: { !meetingEnabled },
+                shouldDiarizeMeetings: { meetingEnabled },
+                diarizationService: diarization,
+                meetingArtifactStore: nil, meetingAutomationHookRunner: nil
+            )
+            _ = try await configuredService.retranscribe(
+                existing: original, fileURL: URL(fileURLWithPath: "/tmp/part.wav"), source: .meeting
+            )
+            let called = await diarization.diarizeCalled
+            XCTAssertEqual(called, meetingEnabled, "Meeting audio must not inherit the file speaker setting")
+        }
     }
 
     func testRetranscribeAutomaticSpeakerCountUsesFreshUnconstrainedService() async throws {
@@ -3756,7 +3836,10 @@ final class TranscriptionServiceTests: XCTestCase {
         startContext: MeetingStartContext? = nil,
         meetingTypeId: UUID? = nil,
         captureReport: MeetingCaptureReport? = nil,
-        durationSeconds: TimeInterval = 3
+        durationSeconds: TimeInterval = 3,
+        startedAt: Date? = nil,
+        audioRetentionStartedAt: Date? = nil,
+        titleOverride: String? = nil
     ) throws -> MeetingRecordingOutput {
         let recordingFolder = URL(fileURLWithPath: AppPaths.tempDir)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -3789,7 +3872,10 @@ final class TranscriptionServiceTests: XCTestCase {
             ),
             captureReport: captureReport,
             startContext: startContext,
-            meetingTypeId: meetingTypeId
+            meetingTypeId: meetingTypeId,
+            startedAt: startedAt,
+            audioRetentionStartedAt: audioRetentionStartedAt,
+            titleOverride: titleOverride
         )
     }
 
