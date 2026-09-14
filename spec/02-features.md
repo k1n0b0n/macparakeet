@@ -1374,8 +1374,11 @@ new scheduling architecture.
 
 **Acceptance criteria:**
 - [ ] All supported formats generate correctly
-- [ ] SRT/VTT contain properly timed segments from word-level timestamps
-- [x] DAPT preserves aligned timing and available speaker labels, with an untimed fallback when alignment is absent or stale
+- [ ] SRT/VTT contain properly timed segments from word-level timestamps; a
+  corrected line uses its preserved segment envelope instead of fabricated
+  per-word timing
+- [x] DAPT preserves honest automatic or segment timing and available speaker
+  labels, with an untimed fallback when alignment is absent or stale
 - [ ] DOCX opens correctly in Word/Pages/Google Docs
 - [ ] PDF is well-formatted and print-ready
 - [ ] JSON includes all word-level data with confidence scores
@@ -1447,7 +1450,7 @@ are unaffected.
 **Technical notes:**
 - Uses FluidAudio's offline diarization pipeline (separate from ASR, see ADR-010)
 - Three-stage pipeline: pyannote community-1 (segmentation) + WeSpeaker v2 (embeddings) + VBx (clustering)
-- Current source pins FluidAudio 0.15.6 and uses `DiarizationService.highAccuracyConfig`. Older DER figures predate clustering fixes and are not a quality measurement of this build; see ADR-010's 2026-09-06 amendment.
+- Current source pins FluidAudio 0.15.7 and uses `DiarizationService.highAccuracyConfig`. Older DER figures predate clustering fixes and are not a quality measurement of this build; see ADR-010.
 - ~130 MB additional model download (one-time, cached alongside ASR models)
 - Runs after ASR completes, merges speaker segments with word-level timestamps by time overlap
 - Diarization is non-fatal — if it fails, ASR result is still persisted without speaker data
@@ -1471,6 +1474,28 @@ are unaffected.
 - [x] Progress shows "Identifying speakers..." headline
 - [x] Settings toggles for file/URL and meeting speaker detection (on by default where supported; explicit off is preserved)
 - [x] CLI: `macparakeet-cli transcribe` follows the saved file/URL speaker-detection preference; meeting retranscription follows the saved meeting speaker-detection preference when app-default; `--speaker-detection off` / `--no-diarize` force off per run, and speaker-count constraints force on
+
+**Timed transcript corrections (development source):**
+
+- A completed timed transcript exposes one `Edit transcript` mode for text,
+  line boundaries, and speaker attribution. Editing replaces one non-empty
+  displayed line; merging is available only for adjacent current lines with
+  the same effective speaker assignment.
+- Line edits and merges use the persistent transcript-scoped correction history
+  and shared Undo/Redo/Reset actions. They do not rewrite automatic word text,
+  word timing, durable anchors, or diarization evidence.
+- Text, Timed, playback, search, AI context, shares, exports, meeting artifacts,
+  and CLI JSON consume the same effective projection. Edited words are timed
+  only to the complete line envelope. Untouched lines retain automatic cue
+  grouping.
+- A split cannot cross an edited range because the app cannot infer where the
+  replacement sentence belongs among the original words. Undo the edit, split,
+  then edit the resulting lines instead.
+- The older whole-transcript editor remains the fallback for transcripts without
+  usable timing. Its replacement is explicitly untimed and is never silently
+  aligned to automatic words.
+
+The governing behavior is [ADR-031](adr/031-timed-transcript-corrections.md).
 
 ---
 
@@ -1714,6 +1739,28 @@ do not contain authoritative independent-route provenance. There is no hidden
 fallback. A live Cohere route therefore shows no meeting preview, while Cohere
 as only the recordings/files override can coexist with another engine's preview; Cohere
 final transcripts remain plain text without word timestamps or speaker labels.
+
+### External meeting recording import
+
+> Status: **IMPLEMENTED IN DEVELOPMENT SOURCE** — release availability follows
+> the normal channel process.
+
+Meetings can import one existing local audio or video recording through a
+native picker or `macparakeet-cli meetings import`. MacParakeet makes a private
+managed audio copy, leaves the external source unchanged, and runs the same
+final meeting transcription, configured speaker detection, indexing, artifacts,
+knowledge-card, and enabled prompt flow used by saved meetings. The chosen
+historical date controls library chronology; the managed copy receives its own
+fresh retention clock. Closing the import sheet leaves app-owned processing
+running, while an explicit Stop preserves any already-published meeting for
+ordinary Retry. See [ADR-030](adr/030-external-meeting-import.md) and the
+[meeting import contract](contracts/meeting-import-v1.md).
+
+- [x] Native one-file picker with editable title and historical date
+- [x] Public CLI command with stable JSON/envelope output and durable-result exit semantics
+- [x] Source-preserving normalization into ordinary meeting artifacts and recovery
+- [x] Historical chronology separated from managed-audio retention age
+- [x] Complete, partial, and retryable results remain distinct across Core, app, and CLI
 
 ### F36: Live Meeting Notepad
 
@@ -2011,12 +2058,13 @@ These are implemented in source; release availability follows the
 | Surface | Current behavior | Governing reference |
 |---|---|---|
 | Saved meeting notes | Debounced editing, explicit save/flush boundaries and optional inclusion in result prompts; historical results retain the notes actually sent. | [ADR-020](adr/020-live-meeting-notepad-and-memo-summaries.md) |
-| Speaker corrections | Transcript-scoped add, rename, assign, split, merge, remove, reset and Undo/Redo; effective attribution flows into retrieval, AI and exported artifacts without rewriting recognized words. | [ADR-010](adr/010-speaker-diarization.md), [data model](01-data-model.md) |
+| Transcript corrections | Transcript-scoped line text edits, adjacent same-speaker line merges, speaker attribution changes, reset and Undo/Redo; one effective projection flows into playback, retrieval, AI, shares, exports and artifacts without rewriting recognized words or timing. | [ADR-031](adr/031-timed-transcript-corrections.md), [ADR-010](adr/010-speaker-diarization.md), [data model](01-data-model.md) |
 | Result generation settings | Per-prompt settings with validation, provider capability handling and effective-request snapshots. | [Spec 14](14-per-prompt-inference-settings.md) |
 | Rich AI output | Shared static/streaming Markdown rendering for results/chat while preserving source Markdown for copy and export. | [UI patterns](04-ui-patterns.md#llm-markdown-content) |
 | Local retrieval | Segment FTS search, bounded cited context and validated knowledge cards for file/URL/meeting transcripts; dictation history search remains separate. | [Integration guide](../integrations/README.md) |
 | Vocabulary cleanup | Confirmed deletion of selected rules, including all search matches, without rewriting existing transcripts. | [Deletion contract](contracts/custom-word-deletion.md) |
-| DAPT export | Timed speaker-attributed events when aligned; untimed fallback otherwise. | [DAPT contract](contracts/dapt-export-v1.md) |
+| DAPT export | Timed speaker-attributed events at automatic word or corrected segment alignment; untimed fallback otherwise. | [DAPT contract](contracts/dapt-export-v1.md) |
+| Split and transcribe | User-approved cuts create independently owned saved meetings while preserving the original; sequential transcription and enabled completion can continue or resume from durable receipts in the app and public CLI. | [Split contract](contracts/meeting-splitting.md) |
 
 These do not enable activity-based meeting detection, app-aware AI Formatter
 profiles or public in-process MLX. Corpus-wide Ask and cross-file speaker

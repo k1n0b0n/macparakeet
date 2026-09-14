@@ -186,9 +186,9 @@ final class TranscriptionSpeakerCorrectionViewModelTests: XCTestCase {
         try await waitUntil { viewModel.speakerAttribution != nil }
 
         let command = SpeakerCorrectionCommand.rename(speakerID: "S1", label: "Alice")
-        viewModel.applySpeakerCorrection(command)
+        let persisted = await viewModel.applySpeakerCorrectionAndWait(command)
 
-        try await waitUntil { !viewModel.isApplyingSpeakerCorrection && viewModel.canUndoSpeakerCorrection }
+        XCTAssertTrue(persisted)
         let calls = await service.applyCalls
         let call = try XCTUnwrap(calls.first)
         XCTAssertEqual(calls.count, 1)
@@ -267,8 +267,11 @@ final class TranscriptionSpeakerCorrectionViewModelTests: XCTestCase {
         viewModel.currentTranscription = transcription
         try await waitUntil { reader.requestedIDs.count == 1 && viewModel.speakerAttribution != nil }
 
-        viewModel.applySpeakerCorrection(.rename(speakerID: "S1", label: "Alice"))
+        let persisted = await viewModel.applySpeakerCorrectionAndWait(
+            .rename(speakerID: "S1", label: "Alice")
+        )
 
+        XCTAssertFalse(persisted)
         try await waitUntil { reader.requestedIDs.count == 2 && !viewModel.isApplyingSpeakerCorrection }
         XCTAssertEqual(
             viewModel.errorMessage,

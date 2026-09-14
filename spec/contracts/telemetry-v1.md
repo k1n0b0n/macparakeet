@@ -77,6 +77,46 @@ poisoning the queue. Consent changes invalidate retry timing and queued snapshot
 Local structured `telemetry_transport` logs contain outcomes, numeric status,
 batch/drop counts and retry timing, never event props or response bodies.
 
+## Microphone engine lifecycle observation
+
+`audio_engine_lifecycle` observes shared-microphone start, prepare, recovery,
+and stop. The [catalog](../../docs/telemetry.md#5e-microphone-engine-lifecycle)
+defines its finite phases and exact safe fields. A fresh random `attempt_id`
+identifies one lifecycle call and its route fallbacks, not a meeting,
+`operation_id`, user, or persistent identity. When a meeting or dictation
+owns capture, the snapshot also carries that workflow's `workflow_id` and
+`consumer` (`meeting` or `dictation`) so agents can join it to the parent
+`*_operation` event. Casing is preserved so it matches the product event.
+Idle prepare/stop omit those fields. Each recovery
+attempt starts a new observer; its elapsed time excludes scheduled recovery
+backoff.
+
+An independent utility timer can publish one `outcome=slow` checkpoint after
+five seconds while native lifecycle work remains pending. It is observability
+only: no audio graph changes, cancellation, restart, or hard timeout. Start and
+recovery publish one terminal outcome if they return. Prepare and stop publish
+only when slow, including failures/cancellations; fast lifecycle snapshots are
+suppressed in both sinks. Finishing after the threshold before the timer runs
+publishes only a terminal with `was_slow=true`. A checkpoint and terminal share
+`attempt_id` but have distinct envelope event UUIDs. `slow` is not a failure or
+terminal outcome, and these rows do not change product-operation denominators.
+
+The snapshot uses monotonic bounded durations, finite route/transport categories,
+and classified errors without descriptions or device identities. Its local
+sorted line and typed network event share the same snapshot. A serial utility
+emission queue preserves order without doing sink work under the diagnostic
+state lock or on the audio render callback. Local append and network delivery
+are asynchronous and best effort under their existing policies. Missing
+terminal evidence remains unknown; a phase checkpoint is not native root-cause
+proof or a guarantee that this operation will recover.
+
+Queued events copy sanitized `git_commit` and `build_number` into props. D1
+does not persist extra envelope columns; invalid values become `unknown`.
+`meeting_operation.capture_start_completed` is `false` when `stage=start_recording`
+has no recording output, `true` when an output exists, and omitted otherwise.
+The same `workflow_id` / `consumer` pair is appended to local audio log lines
+at enqueue time so a deferred write cannot pick up a later session.
+
 ## Aggregate evidence
 
 The website's `/api/stats` keeps its existing aggregate fields. Additive
@@ -143,6 +183,15 @@ diagnostics or claim that the absence of logged failures means successful audio.
 - `AudioCaptureDiagnosticsTests` pins local correlation fields, bridged error
   codes, and append/rotation behavior. The offline parser's synthetic-file
   tests live in `scripts/dev/tests/test_query_audio_diagnostics.py`.
+- `AudioEngineLifecycleDiagnosticsTests` pins the lifecycle schema, phase
+  clocks, suppression, cancellation, safe labels/errors, capture-correlation
+  join fields, and checkpoint/terminal races.
+  `MicrophoneEngineLifecycleDiagnosticsTests` checks the platform
+  integration through injected lifecycle operations; neither proves physical
+  hardware recovery or the cause of a native framework hang.
+- `scripts/ci/check-telemetry-allowlist.sh` fails when Swift emits an event
+  name absent from the website `ALLOWED_EVENTS` set. CI skips when the private
+  website repo cannot be read.
 
 Update the typed event factories, focused tests, and
 [telemetry catalog](../../docs/telemetry.md) together when this boundary changes.
@@ -156,3 +205,8 @@ plan. App-repo tests do not verify the deployed website contract or ingestion.
 App changes require a new app/CLI build. Website changes are in the separate
 `macparakeet-website` repository and require deployment. Existing stored private
 rows and previously cached public responses are not deleted by source changes.
+Deploy the website validator before releasing a client that emits new
+`audio_engine_lifecycle` keys (`workflow_id`, `consumer`, `git_commit`,
+`build_number`). Unknown event names still 400 the whole batch; unknown keys
+on this event are dropped silently. A paired source change or passing app
+tests does not prove the deployed endpoint accepts the fields.

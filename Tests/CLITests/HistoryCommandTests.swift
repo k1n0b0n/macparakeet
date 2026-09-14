@@ -368,6 +368,43 @@ final class HistoryCommandTests: XCTestCase {
         XCTAssertTrue(output.contains("Deleted all stored meeting audio"))
     }
 
+    func testClearMeetingAudioCommandLeavesFilesAndPathsIntactWhenMutationLeaseIsBusy() throws {
+        let dbURL = temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: dbURL) }
+        let db = try DatabaseManager(path: dbURL.path)
+        let repo = TranscriptionRepository(dbQueue: db.dbQueue)
+        let meetingRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macparakeet-cli-meetings-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: meetingRoot) }
+        let folder = meetingRoot.appendingPathComponent("session", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let audioURL = folder.appendingPathComponent("meeting-playback.m4a")
+        try Data("audio".utf8).write(to: audioURL)
+        let meeting = Transcription(
+            fileName: "meeting-playback.m4a",
+            filePath: audioURL.path,
+            rawTranscript: "Keep both phases atomic",
+            status: .completed,
+            sourceType: .meeting
+        )
+        try repo.save(meeting)
+        let holder = try MeetingMediaMutationLease.acquire(roots: [meetingRoot])
+        defer { holder.release() }
+        let command = try ClearMeetingAudioSubcommand.parse([
+            "--database", dbURL.path,
+            "--meeting-recordings-directory", meetingRoot.path,
+        ])
+
+        XCTAssertThrowsError(try command.run()) { error in
+            guard case MeetingMediaMutationLease.AcquisitionError.busy(let busyRoot) = error else {
+                return XCTFail("expected a busy media mutation lease, got \(error)")
+            }
+            XCTAssertEqual(busyRoot, meetingRoot.resolvingSymlinksInPath().standardizedFileURL.path)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audioURL.path))
+        XCTAssertEqual(try repo.fetch(id: meeting.id)?.filePath, audioURL.path)
+    }
+
     func testClearMeetingAudioCommandJSONReportsAffectedIDs() throws {
         let dbURL = temporaryDatabaseURL()
         defer { try? FileManager.default.removeItem(at: dbURL) }

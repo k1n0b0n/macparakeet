@@ -409,6 +409,7 @@ enum CLIErrorType {
     static let auth = "auth"
     static let config = "config"
     static let connection = "connection"
+    static let conflict = "conflict"
     static let context = "context"
     static let importSchema = "import_schema"
     static let inputEmpty = "input_empty"
@@ -424,6 +425,14 @@ enum CLIErrorType {
     static let validation = "validation"
 
     static func key(for error: Error) -> String {
+        if let importError = error as? MeetingImportError {
+            switch importError {
+            case .invalidSource, .unsupportedFormat, .blankTitle:
+                return validation
+            case .invalidAudio:
+                return runtime
+            }
+        }
         if let llm = error as? LLMError {
             switch llm {
             case .notConfigured: return config
@@ -440,6 +449,22 @@ enum CLIErrorType {
             }
         }
         if error is MeetingClassificationRepositoryError { return validation }
+        if error is MeetingCorrectionCLIError { return validation }
+        if let correction = error as? SpeakerCorrectionServiceError {
+            switch correction {
+            case .conflict:
+                return conflict
+            case .transcriptionNotFound:
+                return lookup
+            case .invalidCommand(.invalidText):
+                return inputEmpty
+            case .malformedHistory:
+                return runtime
+            case .transcriptionIncomplete, .timingsRequired, .durableSegmentsRequired,
+                .untimedTranscriptEdit, .invalidCommand, .nothingToUndo, .nothingToRedo:
+                return validation
+            }
+        }
         if let collection = error as? PromptCollectionRepositoryError {
             switch collection {
             case .collectionNotFound:
@@ -546,6 +571,19 @@ enum CLIErrorFix {
                 return "Send UTF-8 input."
             }
         }
+        if let correction = error as? SpeakerCorrectionServiceError {
+            switch correction {
+            case .conflict:
+                return "Read the latest transcript JSON, then retry with its revision and current segment IDs."
+            case .transcriptionNotFound:
+                return "List meetings and retry with a full UUID or longer UUID prefix."
+            case .malformedHistory:
+                return nil
+            case .transcriptionIncomplete, .timingsRequired, .durableSegmentsRequired,
+                .untimedTranscriptEdit, .invalidCommand, .nothingToUndo, .nothingToRedo:
+                return "Read the latest transcript JSON and retry with a supported correction."
+            }
+        }
         if error is ValidationError {
             return "Run the command with --help and retry with a supported flag combination."
         }
@@ -619,11 +657,31 @@ private func rethrowWithOptionalJSONEnvelope(_ error: Error, json: Bool) throws 
 }
 
 func isCLIValidationMisuse(_ error: Error) -> Bool {
+    if let importError = error as? MeetingImportError {
+        switch importError {
+        case .invalidSource, .unsupportedFormat, .blankTitle:
+            return true
+        case .invalidAudio:
+            return false
+        }
+    }
     if error is ValidationError || error is CLIInputError {
         return true
     }
     if error is MeetingClassificationRepositoryError {
         return true
+    }
+    if error is MeetingCorrectionCLIError {
+        return true
+    }
+    if let correction = error as? SpeakerCorrectionServiceError {
+        switch correction {
+        case .conflict, .transcriptionNotFound, .malformedHistory:
+            return false
+        case .transcriptionIncomplete, .timingsRequired, .durableSegmentsRequired,
+            .untimedTranscriptEdit, .invalidCommand, .nothingToUndo, .nothingToRedo:
+            return true
+        }
     }
     if let collection = error as? PromptCollectionRepositoryError {
         switch collection {

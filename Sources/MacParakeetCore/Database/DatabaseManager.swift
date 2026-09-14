@@ -89,7 +89,8 @@ public final class DatabaseManager: Sendable {
             config.prepareDatabase { db in
                 db.trace { event in
                     if case .statement(let statement) = event,
-                       let sql = Self.safeSQLTrace(statement.sql) {
+                        let sql = Self.safeSQLTrace(statement.sql)
+                    {
                         print("SQL: \(sql)")
                     }
                 }
@@ -1835,7 +1836,8 @@ public final class DatabaseManager: Sendable {
         migrator.registerMigration("v0.37-general-transcription-labels") { db in
             let meetingTypes = try MeetingType.fetchAll(db)
             for meetingType in meetingTypes {
-                let existingByName = try MeetingLabel
+                let existingByName =
+                    try MeetingLabel
                     .filter(sql: "name = ? COLLATE NOCASE", arguments: [meetingType.name])
                     .fetchOne(db)
 
@@ -1933,7 +1935,8 @@ public final class DatabaseManager: Sendable {
                         let meetingType = typesByID[typeID]
                     else { continue }
                     scope = .label
-                    labelID = labelsByID[typeID]?.id
+                    labelID =
+                        labelsByID[typeID]?.id
                         ?? labelsByName[
                             meetingType.name.folding(
                                 options: [.caseInsensitive, .diacriticInsensitive],
@@ -2186,6 +2189,132 @@ public final class DatabaseManager: Sendable {
                 ON share_outbox_operations(sharePublicationId)
                 WHERE kind = 'delete'
                 """)
+        }
+
+        // v0.42 — Split and transcribe (spec/contracts/meeting-splitting.md):
+        // a small durable operation receipt so audio publication is
+        // all-or-none and retryable, plus optional child provenance. No
+        // foreign key references `transcriptions`: the receipt and provenance
+        // are plain snapshots that must survive deletion of the source or any
+        // sibling part, not live joins.
+        migrator.registerMigration("v0.42-meeting-split-operations") { db in
+            try db.execute(sql: """
+                CREATE TABLE meeting_split_operations (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    idempotencyKey TEXT NOT NULL,
+                    sourceId TEXT NOT NULL,
+                    request TEXT NOT NULL,
+                    childIds TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('preparing', 'committed', 'discarded')
+                    ),
+                    childProgress TEXT NOT NULL,
+                    createdAt TEXT NOT NULL,
+                    updatedAt TEXT NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_meeting_split_operations_key
+                ON meeting_split_operations (idempotencyKey)
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_meeting_split_operations_source
+                ON meeting_split_operations (sourceId)
+                """)
+
+            let columns = try db.columns(in: "transcriptions").map(\.name)
+            if !columns.contains("splitProvenance") {
+                try db.execute(sql: "ALTER TABLE transcriptions ADD COLUMN splitProvenance TEXT")
+            }
+        }
+
+        // Historical meeting chronology is independent of when managed audio was imported.
+        migrator.registerMigration("v0.43-meeting-audio-retention") { db in
+            let columns = try db.columns(in: "transcriptions").map(\.name)
+            if !columns.contains("audioRetentionStartedAt") {
+                try db.execute(sql: "ALTER TABLE transcriptions ADD COLUMN audioRetentionStartedAt TEXT")
+            }
+        }
+
+        // v0.44 — The existing correction journal now also carries timed-line
+        // text replacement and boundary suppression. SQLite cannot widen a
+        // CHECK constraint in place, so rebuild both related tables while
+        // preserving their rows, parent links, and persistent undo cursor.
+        migrator.registerMigration("v0.44-timed-transcript-corrections") { db in
+            try db.execute(
+                sql: """
+                    ALTER TABLE speaker_correction_states
+                    RENAME TO speaker_correction_states_v032
+                    """)
+            try db.execute(
+                sql: """
+                    ALTER TABLE speaker_corrections
+                    RENAME TO speaker_corrections_v032
+                    """)
+            try db.execute(
+                sql: """
+                    CREATE TABLE speaker_corrections (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        transcriptionId TEXT NOT NULL
+                            REFERENCES transcriptions(id) ON DELETE CASCADE,
+                        parentId TEXT,
+                        sequence INTEGER NOT NULL CHECK (sequence > 0),
+                        transcriptFingerprint TEXT NOT NULL,
+                        operation TEXT NOT NULL CHECK (
+                            operation IN (
+                                'rename', 'add', 'assign', 'split', 'unsplit',
+                                'merge', 'remove', 'editText', 'mergeSegments', 'reset'
+                            )
+                        ),
+                        payload TEXT NOT NULL,
+                        branchState TEXT NOT NULL CHECK (
+                            branchState IN ('current', 'redo', 'abandoned')
+                        ),
+                        createdAt TEXT NOT NULL,
+                        UNIQUE (transcriptionId, sequence),
+                        UNIQUE (id, transcriptionId),
+                        FOREIGN KEY (parentId, transcriptionId)
+                            REFERENCES speaker_corrections(id, transcriptionId)
+                            ON DELETE CASCADE
+                    )
+                    """)
+            try db.execute(
+                sql: """
+                    INSERT INTO speaker_corrections
+                    SELECT * FROM speaker_corrections_v032
+                    ORDER BY transcriptionId, sequence
+                    """)
+            try db.execute(
+                sql: """
+                    CREATE TABLE speaker_correction_states (
+                        transcriptionId TEXT PRIMARY KEY NOT NULL
+                            REFERENCES transcriptions(id) ON DELETE CASCADE,
+                        transcriptFingerprint TEXT NOT NULL,
+                        headId TEXT,
+                        revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+                        updatedAt TEXT NOT NULL,
+                        FOREIGN KEY (headId, transcriptionId)
+                            REFERENCES speaker_corrections(id, transcriptionId)
+                            ON DELETE CASCADE
+                    )
+                    """)
+            try db.execute(
+                sql: """
+                    INSERT INTO speaker_correction_states
+                    SELECT * FROM speaker_correction_states_v032
+                    """)
+            try db.execute(sql: "DROP TABLE speaker_correction_states_v032")
+            try db.execute(sql: "DROP TABLE speaker_corrections_v032")
+            try db.execute(
+                sql: """
+                    CREATE INDEX idx_speaker_corrections_replay
+                    ON speaker_corrections (
+                        transcriptionId,
+                        transcriptFingerprint,
+                        branchState,
+                        sequence
+                    )
+                    """)
         }
 
         return migrator

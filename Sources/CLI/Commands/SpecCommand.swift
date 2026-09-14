@@ -1312,6 +1312,90 @@ private extension CLISpecCommand {
             output: "MeetingTranscriptRecord object with transcriptSegments for --format json."
         ),
         CLISpecCommand(
+            ["meetings", "corrections", "edit-line"],
+            summary:
+                "Replace one timed transcript line through the reversible correction journal.",
+            readOnly: false,
+            arguments: [.argument("meeting", summary: "Meeting UUID, UUID prefix, or exact title.")],
+            options: [
+                CLISpecParameter.option(
+                    "--segment", valueName: "UUID", required: true,
+                    summary: "Current segment ID from meetings transcript --format json."),
+                CLISpecParameter.option("--text", valueName: "TEXT", summary: "Replacement text."),
+                CLISpecParameter.flag("--stdin", summary: "Read replacement text from stdin."),
+                CLISpecParameter.option(
+                    "--expected-revision", valueName: "N", required: true,
+                    summary: "Optimistic speakerCorrectionRevision from the last transcript read."),
+                CLISpecParameter.flag(
+                    "--envelope", summary: "Wrap JSON output in an ok/data/meta success envelope."),
+                databaseOption,
+            ],
+            output: "Updated MeetingTranscriptRecord object when --json or --envelope is used."
+        ),
+        CLISpecCommand(
+            ["meetings", "corrections", "merge-lines"],
+            summary: "Merge adjacent same-speaker timed transcript lines.",
+            readOnly: false,
+            arguments: [.argument("meeting", summary: "Meeting UUID, UUID prefix, or exact title.")],
+            options: [
+                CLISpecParameter.option(
+                    "--segment", valueName: "UUID", required: true,
+                    summary: "Current segment ID; repeat in transcript order at least twice."),
+                CLISpecParameter.option(
+                    "--expected-revision", valueName: "N", required: true,
+                    summary: "Optimistic speakerCorrectionRevision from the last transcript read."),
+                CLISpecParameter.flag(
+                    "--envelope", summary: "Wrap JSON output in an ok/data/meta success envelope."),
+                databaseOption,
+            ],
+            output: "Updated MeetingTranscriptRecord object when --json or --envelope is used."
+        ),
+        CLISpecCommand(
+            ["meetings", "corrections", "undo"],
+            summary: "Undo the active transcript correction.",
+            readOnly: false,
+            arguments: [.argument("meeting", summary: "Meeting UUID, UUID prefix, or exact title.")],
+            options: [
+                CLISpecParameter.option(
+                    "--expected-revision", valueName: "N", required: true,
+                    summary: "Optimistic speakerCorrectionRevision from the last transcript read."),
+                CLISpecParameter.flag(
+                    "--envelope", summary: "Wrap JSON output in an ok/data/meta success envelope."),
+                databaseOption,
+            ],
+            output: "Updated MeetingTranscriptRecord object when --json or --envelope is used."
+        ),
+        CLISpecCommand(
+            ["meetings", "corrections", "redo"],
+            summary: "Redo the next transcript correction.",
+            readOnly: false,
+            arguments: [.argument("meeting", summary: "Meeting UUID, UUID prefix, or exact title.")],
+            options: [
+                CLISpecParameter.option(
+                    "--expected-revision", valueName: "N", required: true,
+                    summary: "Optimistic speakerCorrectionRevision from the last transcript read."),
+                CLISpecParameter.flag(
+                    "--envelope", summary: "Wrap JSON output in an ok/data/meta success envelope."),
+                databaseOption,
+            ],
+            output: "Updated MeetingTranscriptRecord object when --json or --envelope is used."
+        ),
+        CLISpecCommand(
+            ["meetings", "corrections", "reset"],
+            summary: "Reset the active transcript projection to its automatic baseline.",
+            readOnly: false,
+            arguments: [.argument("meeting", summary: "Meeting UUID, UUID prefix, or exact title.")],
+            options: [
+                CLISpecParameter.option(
+                    "--expected-revision", valueName: "N", required: true,
+                    summary: "Optimistic speakerCorrectionRevision from the last transcript read."),
+                CLISpecParameter.flag(
+                    "--envelope", summary: "Wrap JSON output in an ok/data/meta success envelope."),
+                databaseOption,
+            ],
+            output: "Updated MeetingTranscriptRecord object when --json or --envelope is used."
+        ),
+        CLISpecCommand(
             ["meetings", "notes", "get"],
             summary: "Read user-authored notes from a meeting.",
             arguments: [.argument("meeting", summary: "Meeting UUID, UUID prefix, or exact title.")],
@@ -1415,6 +1499,92 @@ private extension CLISpecCommand {
             ],
             output:
                 "Meeting Markdown in the same shape as meeting.md, or MeetingRecord JSON with prompt-result count and artifact paths when --stdout is present; otherwise writes a file and prints its path."
+        ),
+        CLISpecCommand(
+            ["meetings", "import"],
+            summary: "Import one external audio or video recording as a managed, searchable meeting.",
+            readOnly: false,
+            arguments: [.argument("path", summary: "Local audio or video file path.")],
+            options: [
+                CLISpecParameter.option("--title", valueName: "TITLE", summary: "Explicit title; defaults to the filename."),
+                CLISpecParameter.option(
+                    "--started-at", valueName: "DATE",
+                    summary: "YYYY-MM-DD at local midnight or an ISO-8601 timestamp."),
+                CLISpecParameter.flag("--envelope", summary: "Wrap JSON output in an ok/data/meta success envelope."),
+                databaseOption,
+            ],
+            output:
+                "MeetingImportRecord with id, completion, status, title, startedAt, durationMs, managedAudioPath, and warnings. Complete and partial results exit 0; needsRetry prints its saved meeting then exits 1, or 130 after SIGINT."
+        ),
+        CLISpecCommand(
+            ["meetings", "split", "preview"],
+            summary: "Read-only preview of the parts a split would produce. Performs no writes.",
+            arguments: [.argument("meeting", summary: "Meeting UUID, UUID prefix, or exact title.")],
+            options: [
+                CLISpecParameter.option(
+                    "--cut", valueName: "MS", summary: "A cut point in milliseconds; repeatable, ascending."),
+                CLISpecParameter.flag("--envelope", summary: "Wrap JSON output in an ok/data/meta success envelope."),
+                databaseOption,
+            ],
+            output: "MeetingSplitPreview object: total duration, ranges, and which optional tracks exist."
+        ),
+        CLISpecCommand(
+            ["meetings", "split", "create"],
+            summary:
+                "Split a saved meeting and process every part sequentially: first transcription, then enabled automation.",
+            readOnly: false,
+            arguments: [.argument("meeting", summary: "Meeting UUID, UUID prefix, or exact title.")],
+            options: [
+                CLISpecParameter.option(
+                    "--cut", valueName: "MS", summary: "A cut point in milliseconds; repeatable, ascending."),
+                CLISpecParameter.option(
+                    "--title", valueName: "TITLE",
+                    summary: "Title for one resulting part, in order; repeatable, must be cuts.count + 1."),
+                CLISpecParameter.option(
+                    "--key", valueName: "KEY",
+                    summary: "Explicit idempotency key; defaults to a stable key derived from the meeting id, cuts and titles."),
+                CLISpecParameter.option("--expected-identity", valueName: "IDENTITY", summary: "Opaque sourceIdentity from preview; reject changed source audio."),
+                CLISpecParameter.flag("--dry-run", summary: "Validate and print the preview only; performs no writes."),
+                CLISpecParameter.flag("--envelope", summary: "Wrap JSON output in an ok/data/meta success envelope."),
+                databaseOption,
+            ],
+            output:
+                "MeetingSplitOperation object (or MeetingSplitPreview when --dry-run). Safe to repeat with identical arguments after an interruption; never duplicates parts."
+        ),
+        CLISpecCommand(
+            ["meetings", "split", "status"],
+            summary: "Show one split operation's progress, or discover prior operations for a source recording.",
+            arguments: [.argument("operationId", required: false, summary: "Split operation UUID; omit when using --source.")],
+            options: [
+                CLISpecParameter.option(
+                    "--source", valueName: "MEETING",
+                    summary: "List every split operation recorded for this meeting instead of one operation id."),
+                CLISpecParameter.flag("--envelope", summary: "Wrap JSON output in an ok/data/meta success envelope."),
+                databaseOption,
+            ],
+            output: "MeetingSplitOperation object, or an array of them when --source is used."
+        ),
+        CLISpecCommand(
+            ["meetings", "split", "resume"],
+            summary: "Resume processing a committed split operation without recreating audio.",
+            readOnly: false,
+            arguments: [.argument("operationId", summary: "Split operation UUID.")],
+            options: [
+                CLISpecParameter.flag("--envelope", summary: "Wrap JSON output in an ok/data/meta success envelope."),
+                databaseOption,
+            ],
+            output: "MeetingSplitOperation object. Retries only unfinished/failed children; completed work is never repeated."
+        ),
+        CLISpecCommand(
+            ["meetings", "split", "discard"],
+            summary: "Abandon a not-yet-published split operation and remove its unpublished output.",
+            readOnly: false,
+            arguments: [.argument("operationId", summary: "Split operation UUID.")],
+            options: [
+                CLISpecParameter.flag("--envelope", summary: "Wrap JSON output in an ok/data/meta success envelope."),
+                databaseOption,
+            ],
+            output: "MeetingSplitOperation object with status discarded. Refused once the operation has committed audio parts."
         ),
     ]
 }

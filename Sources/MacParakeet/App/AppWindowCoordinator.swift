@@ -65,6 +65,8 @@ final class AppWindowCoordinator: NSObject, NSWindowDelegate {
     private let libraryViewModel: TranscriptionLibraryViewModel
     private let meetingsWorkspaceViewModel: MeetingsWorkspaceViewModel
     private let meetingPillViewModel: MeetingRecordingPillViewModel
+    private let meetingSplitViewModel: MeetingSplitViewModel
+    private let meetingImportViewModel: MeetingImportViewModel
     private let shareManagementViewModel: ShareManagementViewModel?
     private let updaterController: SPUStandardUpdaterController
     private let onRecordMeeting: () -> Void
@@ -96,6 +98,8 @@ final class AppWindowCoordinator: NSObject, NSWindowDelegate {
         libraryViewModel: TranscriptionLibraryViewModel,
         meetingsWorkspaceViewModel: MeetingsWorkspaceViewModel,
         meetingPillViewModel: MeetingRecordingPillViewModel,
+        meetingSplitViewModel: MeetingSplitViewModel,
+        meetingImportViewModel: MeetingImportViewModel,
         shareManagementViewModel: ShareManagementViewModel? = nil,
         updaterController: SPUStandardUpdaterController,
         onRecordMeeting: @escaping () -> Void,
@@ -123,6 +127,8 @@ final class AppWindowCoordinator: NSObject, NSWindowDelegate {
         self.libraryViewModel = libraryViewModel
         self.meetingsWorkspaceViewModel = meetingsWorkspaceViewModel
         self.meetingPillViewModel = meetingPillViewModel
+        self.meetingSplitViewModel = meetingSplitViewModel
+        self.meetingImportViewModel = meetingImportViewModel
         self.shareManagementViewModel = shareManagementViewModel
         self.updaterController = updaterController
         self.onRecordMeeting = onRecordMeeting
@@ -237,6 +243,8 @@ final class AppWindowCoordinator: NSObject, NSWindowDelegate {
             libraryViewModel: libraryViewModel,
             meetingsWorkspaceViewModel: meetingsWorkspaceViewModel,
             meetingPillViewModel: meetingPillViewModel,
+            meetingSplitViewModel: meetingSplitViewModel,
+            meetingImportViewModel: meetingImportViewModel,
             shareManagementViewModel: shareManagementViewModel,
             updater: updaterController.updater,
             onRecordMeeting: onRecordMeeting,

@@ -439,8 +439,11 @@ struct ClearMeetingAudioSubcommand: ParsableCommand {
             }
 
             try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            try TranscriptionAssetCleanup.removeManagedMeetingAudioFiles(under: dir, fileManager: fm)
-            let affectedIDs = try repo.clearStoredAudioPathsForMeetingTranscriptions(under: dir)
+            let affectedIDs = try TranscriptionAssetCleanup.clearManagedMeetingAudio(
+                under: dir,
+                repository: repo,
+                fileManager: fm
+            )
 
             if json {
                 try printJSON(

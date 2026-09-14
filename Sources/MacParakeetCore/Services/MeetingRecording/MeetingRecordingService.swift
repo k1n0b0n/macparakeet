@@ -2097,6 +2097,7 @@ public actor MeetingRecordingService: MeetingRecordingServiceProtocol {
             "captured_duration_s=\(String(format: "%.3f", Double(captureReport?.capturedDurationMs ?? 0) / 1_000))",
             "capture_quality=\(captureReport?.quality.rawValue ?? "unknown")",
             "source_mode=\(captureHealthMetrics.sourceMode?.rawValue ?? "unknown")",
+            "capture_start_completed=\(captureHealthMetrics.captureStartedAt != nil)",
             "mic_started=\(captureHealthMetrics.microphoneStarted)",
             "requested_mic_mode=\(micModeLabel(captureHealthMetrics.requestedMicMode))",
             "effective_mic_mode=\(captureHealthMetrics.effectiveMicMode?.rawValue ?? "unknown")",

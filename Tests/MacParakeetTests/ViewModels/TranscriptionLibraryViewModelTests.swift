@@ -1,4 +1,5 @@
 import XCTest
+import GRDB
 @testable import MacParakeetCore
 @testable import MacParakeetViewModels
 
@@ -6,10 +7,12 @@ import XCTest
 final class TranscriptionLibraryViewModelTests: XCTestCase {
     var vm: TranscriptionLibraryViewModel!
     var repo: TranscriptionRepository!
+    var dbQueue: DatabaseQueue!
 
     override func setUp() async throws {
         let manager = try DatabaseManager()
         repo = TranscriptionRepository(dbQueue: manager.dbQueue)
+        dbQueue = manager.dbQueue
         vm = TranscriptionLibraryViewModel()
         vm.configure(transcriptionRepo: repo)
     }
@@ -26,6 +29,135 @@ final class TranscriptionLibraryViewModelTests: XCTestCase {
 
         await load()
         XCTAssertEqual(vm.transcriptions.count, 2)
+    }
+
+    func testLoadPublishesEffectiveTimedTextForLibraryPreview() async throws {
+        let words = [
+            WordTimestamp(word: "Wrong", startMs: 0, endMs: 150, confidence: 1, speakerId: "S1"),
+            WordTimestamp(word: "words.", startMs: 170, endMs: 350, confidence: 1, speakerId: "S1"),
+        ]
+        let segment = TranscriptSegmentRecord(
+            startMs: 0,
+            endMs: 350,
+            speakerId: "S1",
+            speakerLabel: "Speaker 1",
+            text: "Wrong words.",
+            wordRange: .init(startIndex: 0, endIndexExclusive: 2)
+        )
+        let transcription = Transcription(
+            fileName: "Meeting",
+            rawTranscript: "Wrong words.",
+            cleanTranscript: "Wrong words.",
+            wordTimestamps: words,
+            speakers: [.init(id: "S1", label: "Speaker 1")],
+            transcriptSegments: [segment],
+            status: .completed,
+            sourceType: .meeting
+        )
+        try repo.save(transcription)
+        _ = try await SpeakerCorrectionService(dbQueue: dbQueue).apply(
+            transcriptionId: transcription.id,
+            command: .editText(
+                target: .init(
+                    anchorTranscriptSegmentIDs: [segment.id],
+                    wordRange: segment.wordRange
+                ),
+                text: "Corrected preview."
+            ),
+            expectedFingerprint: SpeakerAttributionResolver.fingerprint(for: transcription),
+            expectedRevision: 0
+        )
+
+        await load()
+
+        let loaded = try XCTUnwrap(vm.transcriptions.first)
+        XCTAssertEqual(vm.effectiveTranscriptText(for: loaded), "Corrected preview.")
+        XCTAssertEqual(loaded.cleanTranscript, "Wrong words.")
+    }
+
+    func testRetryRefreshRetainsCurrentCorrectionOnFailureAndClearsItForNewFingerprint() async throws {
+        let words = [
+            WordTimestamp(word: "Wrong", startMs: 0, endMs: 150, confidence: 1, speakerId: "S1"),
+            WordTimestamp(word: "words.", startMs: 170, endMs: 350, confidence: 1, speakerId: "S1"),
+        ]
+        let segment = TranscriptSegmentRecord(
+            startMs: 0,
+            endMs: 350,
+            speakerId: "S1",
+            speakerLabel: "Speaker 1",
+            text: "Wrong words.",
+            wordRange: .init(startIndex: 0, endIndexExclusive: 2)
+        )
+        let transcription = Transcription(
+            fileName: "Retry meeting",
+            rawTranscript: "Wrong words.",
+            cleanTranscript: "Wrong words.",
+            wordTimestamps: words,
+            speakers: [.init(id: "S1", label: "Speaker 1")],
+            transcriptSegments: [segment],
+            status: .completed,
+            sourceType: .meeting
+        )
+        try repo.save(transcription)
+        _ = try await SpeakerCorrectionService(dbQueue: dbQueue).apply(
+            transcriptionId: transcription.id,
+            command: .editText(
+                target: .init(
+                    anchorTranscriptSegmentIDs: [segment.id],
+                    wordRange: segment.wordRange
+                ),
+                text: "Old corrected preview."
+            ),
+            expectedFingerprint: SpeakerAttributionResolver.fingerprint(for: transcription),
+            expectedRevision: 0
+        )
+        try repo.updateStatus(id: transcription.id, status: .error, errorMessage: "retry")
+        await load()
+        let failed = try XCTUnwrap(vm.transcriptions.first)
+        XCTAssertEqual(vm.effectiveTranscriptText(for: failed), "Old corrected preview.")
+
+        vm.onRetryMeetingTranscription = { _ in
+            throw LibraryRenameTestError.persistenceFailed
+        }
+        await vm.retryMeetingTranscription(failed).value
+
+        let retained = try XCTUnwrap(vm.transcriptions.first)
+        XCTAssertEqual(vm.effectiveTranscriptText(for: retained), "Old corrected preview.")
+
+        let retryRepo = try XCTUnwrap(repo)
+        vm.onRetryMeetingTranscription = { transcription in
+            var retried = try XCTUnwrap(retryRepo.fetch(id: transcription.id))
+            retried.rawTranscript = "Fresh transcript."
+            retried.cleanTranscript = "Fresh transcript."
+            retried.wordTimestamps = [
+                WordTimestamp(
+                    word: "Fresh transcript.",
+                    startMs: 0,
+                    endMs: 400,
+                    confidence: 1,
+                    speakerId: "S1"
+                )
+            ]
+            retried.transcriptSegments = [
+                TranscriptSegmentRecord(
+                    startMs: 0,
+                    endMs: 400,
+                    speakerId: "S1",
+                    speakerLabel: "Speaker 1",
+                    text: "Fresh transcript.",
+                    wordRange: .init(startIndex: 0, endIndexExclusive: 1)
+                )
+            ]
+            retried.status = .completed
+            retried.errorMessage = nil
+            try retryRepo.save(retried)
+        }
+
+        await vm.retryMeetingTranscription(failed).value
+
+        let refreshed = try XCTUnwrap(vm.transcriptions.first)
+        XCTAssertEqual(refreshed.cleanTranscript, "Fresh transcript.")
+        XCTAssertNil(vm.effectiveTranscriptText(for: refreshed))
     }
 
     func testLoadTranscriptionsIncludesProcessingMeetingRowsOnly() async throws {
@@ -1127,10 +1259,7 @@ final class TranscriptionLibraryViewModelTests: XCTestCase {
     }
 
     func testDeleteMeetingAudioKeepsTranscriptionAndClearsFilePath() async throws {
-        try AppPaths.ensureDirectories()
-        let folder = URL(fileURLWithPath: AppPaths.meetingRecordingsDir, isDirectory: true)
-            .appendingPathComponent("library-meeting-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let folder = try makeTemporaryManagedMeetingFolder()
         let audioURL = folder.appendingPathComponent("meeting-playback.m4a")
         let microphoneURL = folder.appendingPathComponent("microphone-raw.m4a")
         let notesURL = folder.appendingPathComponent("notes.md")
@@ -1163,10 +1292,7 @@ final class TranscriptionLibraryViewModelTests: XCTestCase {
     }
 
     func testDeleteMeetingAudioRefusesProcessingMeeting() async throws {
-        try AppPaths.ensureDirectories()
-        let folder = URL(fileURLWithPath: AppPaths.meetingRecordingsDir, isDirectory: true)
-            .appendingPathComponent("library-processing-meeting-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let folder = try makeTemporaryManagedMeetingFolder()
         let audioURL = folder.appendingPathComponent("meeting-playback.m4a")
         let microphoneURL = folder.appendingPathComponent("microphone-raw.m4a")
         XCTAssertTrue(FileManager.default.createFile(atPath: audioURL.path, contents: Data("audio".utf8)))
@@ -1338,10 +1464,7 @@ final class TranscriptionLibraryViewModelTests: XCTestCase {
     }
 
     func testBulkDeleteAudioOnlyClearsMeetingAudioAndSkipsIneligibleSelection() async throws {
-        try AppPaths.ensureDirectories()
-        let folder = URL(fileURLWithPath: AppPaths.meetingRecordingsDir, isDirectory: true)
-            .appendingPathComponent("library-bulk-meeting-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let folder = try makeTemporaryManagedMeetingFolder()
         let audioURL = folder.appendingPathComponent("meeting-playback.m4a")
         let systemURL = folder.appendingPathComponent("system-raw.m4a")
         let manifestURL = folder.appendingPathComponent(MeetingArtifactStore.manifestFileName)
@@ -1401,10 +1524,7 @@ final class TranscriptionLibraryViewModelTests: XCTestCase {
         // "Remove Audio" skipped count must reflect meetings-without-removable-audio
         // only, so the confirmation copy never mislabels videos/podcasts/local
         // files as skipped meetings.
-        try AppPaths.ensureDirectories()
-        let folder = URL(fileURLWithPath: AppPaths.meetingRecordingsDir, isDirectory: true)
-            .appendingPathComponent("library-mixed-skip-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let folder = try makeTemporaryManagedMeetingFolder()
         let audioURL = folder.appendingPathComponent("meeting-playback.m4a")
         let processingAudioURL = folder.appendingPathComponent("processing-meeting-playback.m4a")
         XCTAssertTrue(FileManager.default.createFile(atPath: audioURL.path, contents: Data("audio".utf8)))

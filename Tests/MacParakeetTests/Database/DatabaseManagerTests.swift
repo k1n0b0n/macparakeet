@@ -19,6 +19,33 @@ final class DatabaseManagerTests: XCTestCase {
         "v0.7-snippet-key-action",
     ]
 
+    func testAudioRetentionMigrationAddsNullableColumn() throws {
+        let manager = try DatabaseManager()
+        try manager.dbQueue.read { db in
+            let column = try XCTUnwrap(db.columns(in: "transcriptions").first { $0.name == "audioRetentionStartedAt" })
+            XCTAssertFalse(column.isNotNull)
+        }
+    }
+
+    func testAudioRetentionMigrationPreservesPreviousRows() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio_retention_upgrade_\(UUID().uuidString).db").path
+        defer { cleanupDatabaseFiles(atPath: path) }
+        let previous = try DatabaseManager(path: path)
+        let meeting = Transcription(createdAt: Date(timeIntervalSince1970: 100), fileName: "Historical", sourceType: .meeting)
+        try TranscriptionRepository(dbQueue: previous.dbQueue).save(meeting)
+        try previous.dbQueue.write { db in
+            try db.execute(sql: "ALTER TABLE transcriptions DROP COLUMN audioRetentionStartedAt")
+            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = ?",
+                           arguments: ["v0.43-meeting-audio-retention"])
+        }
+        let upgraded = try DatabaseManager(path: path)
+        let saved = try XCTUnwrap(TranscriptionRepository(dbQueue: upgraded.dbQueue).fetch(id: meeting.id))
+        XCTAssertEqual(saved.fileName, meeting.fileName)
+        XCTAssertEqual(saved.createdAt, meeting.createdAt)
+        XCTAssertNil(saved.audioRetentionStartedAt)
+    }
+
     func testInMemoryDatabaseCreates() throws {
         let manager = try DatabaseManager()
         XCTAssertNotNil(manager.dbQueue)
@@ -154,6 +181,116 @@ final class DatabaseManagerTests: XCTestCase {
         try migrated.dbQueue.read { db in
             XCTAssertTrue(try db.tableExists("speaker_corrections"))
             XCTAssertTrue(try db.tableExists("speaker_correction_states"))
+        }
+    }
+
+    func testTimedCorrectionMigrationPreservesHistoryCursorAndForeignKeys() async throws {
+        let dbPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("timed_corrections_migration_\(UUID().uuidString).db")
+            .path
+        defer { cleanupDatabaseFiles(atPath: dbPath) }
+
+        let words = [
+            WordTimestamp(word: "Hello", startMs: 0, endMs: 150, confidence: 0.9, speakerId: "S1"),
+            WordTimestamp(word: "world.", startMs: 200, endMs: 350, confidence: 0.9, speakerId: "S1"),
+        ]
+        let transcription = Transcription(
+            fileName: "Existing interview",
+            rawTranscript: "Hello world.",
+            cleanTranscript: "Hello world.",
+            wordTimestamps: words,
+            speakers: [.init(id: "S1", label: "Speaker 1")],
+            transcriptSegments: TranscriptSegmenter.materializeSegments(words: words),
+            status: .completed,
+            sourceType: .file
+        )
+        let fingerprint = SpeakerAttributionResolver.fingerprint(for: transcription)
+        let root = SpeakerCorrection(
+            transcriptionId: transcription.id,
+            parentId: nil,
+            sequence: 1,
+            transcriptFingerprint: fingerprint,
+            payload: .rename(speakerID: "S1", label: "Alice")
+        )
+        let target = SpeakerCorrectionTarget(
+            anchorTranscriptSegmentIDs: try XCTUnwrap(transcription.transcriptSegments?.map(\.id)),
+            wordRange: .init(startIndex: 0, endIndexExclusive: 2)
+        )
+        let head = SpeakerCorrection(
+            transcriptionId: transcription.id,
+            parentId: root.id,
+            sequence: 2,
+            transcriptFingerprint: fingerprint,
+            payload: .assign(targets: [target], to: .speaker(id: "S1"))
+        )
+        let redo = SpeakerCorrection(
+            transcriptionId: transcription.id,
+            parentId: head.id,
+            sequence: 3,
+            transcriptFingerprint: fingerprint,
+            payload: .rename(speakerID: "S1", label: "Redo name"),
+            branchState: .redo
+        )
+        let abandoned = SpeakerCorrection(
+            transcriptionId: transcription.id,
+            parentId: head.id,
+            sequence: 4,
+            transcriptFingerprint: fingerprint,
+            payload: .rename(speakerID: "S1", label: "Abandoned name"),
+            branchState: .abandoned
+        )
+
+        var configuration = Configuration()
+        configuration.foreignKeysEnabled = true
+        let queue = try DatabaseQueue(path: dbPath, configuration: configuration)
+        var migrator = DatabaseManager.makeMigrator()
+        try migrator.migrate(queue, upTo: "v0.43-meeting-audio-retention")
+        try TranscriptionRepository(dbQueue: queue).save(transcription)
+        let state = SpeakerCorrectionState(
+            transcriptionId: transcription.id,
+            transcriptFingerprint: fingerprint.rawValue,
+            headId: head.id,
+            revision: 6
+        )
+        try await queue.write { db in
+            try root.insert(db)
+            try head.insert(db)
+            try redo.insert(db)
+            try abandoned.insert(db)
+            try state.insert(db)
+        }
+
+        try migrator.migrate(queue)
+        let history = try SpeakerCorrectionRepository(dbQueue: queue)
+            .fetchHistory(transcriptionId: transcription.id)
+        XCTAssertEqual(history.map(\.id), [root.id, head.id, redo.id, abandoned.id])
+        XCTAssertEqual(history.map(\.parentId), [nil, root.id, head.id, head.id])
+        XCTAssertEqual(history.map(\.branchState), [.current, .current, .redo, .abandoned])
+        XCTAssertEqual(
+            try SpeakerCorrectionRepository(dbQueue: queue)
+                .fetchState(transcriptionId: transcription.id)?.headId,
+            head.id
+        )
+        XCTAssertEqual(
+            try SpeakerCorrectionRepository(dbQueue: queue)
+                .fetchState(transcriptionId: transcription.id)?.revision,
+            6
+        )
+        let result = try await SpeakerCorrectionService(dbQueue: queue).apply(
+            transcriptionId: transcription.id,
+            command: .editText(target: target, text: "Corrected greeting."),
+            expectedFingerprint: fingerprint,
+            expectedRevision: 6
+        )
+        XCTAssertEqual(result.revision, 7)
+        try await queue.read { db in
+            let tableSQL = try XCTUnwrap(String.fetchOne(
+                db,
+                sql: "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'speaker_corrections'"
+            ))
+            XCTAssertTrue(tableSQL.contains("'editText'"))
+            XCTAssertTrue(tableSQL.contains("'mergeSegments'"))
+            XCTAssertTrue(try Row.fetchAll(db, sql: "PRAGMA foreign_key_check").isEmpty)
         }
     }
 
@@ -2051,7 +2188,9 @@ final class DatabaseManagerTests: XCTestCase {
 
     private func cleanupDatabaseFiles(atPath path: String) {
         for suffix in ["", "-shm", "-wal", ".migration.lock"] {
-            try? FileManager.default.removeItem(atPath: path + suffix)
+            let candidate = path + suffix
+            guard FileManager.default.fileExists(atPath: candidate) else { continue }
+            try? FileManager.default.removeItem(atPath: candidate)
         }
     }
 }

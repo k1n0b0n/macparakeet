@@ -72,6 +72,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let feedbackViewModel = FeedbackViewModel()
     private let discoverViewModel = DiscoverViewModel()
     private let libraryViewModel = TranscriptionLibraryViewModel()
+    /// One shared app-owned handle for native Split and transcribe: created
+    /// eagerly (before `AppEnvironment` exists) and `configure`d once it does,
+    /// so a single running batch survives the sheet closing and is reachable
+    /// from every entry point (`TranscriptResultView`, `TranscriptionLibraryView`,
+    /// `MeetingsView`) without duplicating state per view.
+    private let meetingSplitViewModel = MeetingSplitViewModel()
+    private let meetingImportViewModel = MeetingImportViewModel()
     private let meetingsLibraryViewModel = TranscriptionLibraryViewModel(scope: .meetings)
     private let llmSettingsViewModel = LLMSettingsViewModel()
     /// Its service arrives from `setupEnvironment`: building it with one here
@@ -213,6 +220,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         libraryViewModel: libraryViewModel,
         meetingsWorkspaceViewModel: meetingsWorkspaceViewModel,
         meetingPillViewModel: meetingPillViewModel,
+        meetingSplitViewModel: meetingSplitViewModel,
+        meetingImportViewModel: meetingImportViewModel,
         shareManagementViewModel: shareManagementViewModel,
         updaterController: updaterController,
         onRecordMeeting: { [weak self] in
@@ -562,6 +571,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsViewModel.onAccessibilityGranted = { [weak self] in
             self?.handleAccessibilityGrant()
         }
+        meetingSplitViewModel.configure(
+            service: env.meetingSplitService,
+            recordingLookup: { [repository = env.transcriptionRepo] id in try repository.fetch(id: id) },
+            onChildrenPublished: { [weak self] in
+                self?.libraryViewModel.loadTranscriptions()
+                self?.meetingsWorkspaceViewModel.refreshRecentMeetings()
+            }
+        )
+        meetingImportViewModel.configure(
+            service: env.meetingImportService,
+            onMeetingPublished: { [weak self] _ in
+                self?.libraryViewModel.loadTranscriptions()
+                self?.meetingsWorkspaceViewModel.refreshRecentMeetings()
+            }
+        )
 
         let runtime = environmentConfigurer.configure(
             environment: env,

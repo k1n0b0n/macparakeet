@@ -31,7 +31,8 @@
 ## Philosophy
 
 The September 2026 observability changes and verification boundaries are recorded
-in [the audit](audits/2026-09-06-observability-review.md). The
+in the [general audit](audits/2026-09-06-observability-review.md) and
+[issue #931 startup investigation](audits/2026-09-13-issue-931-startup-observability.md). The
 [telemetry contract](../spec/contracts/telemetry-v1.md) governs privacy and outcome
 semantics; the [local diagnostic query guide](local-audio-diagnostics-query.md)
 provides an offline JSON inspection path for agents.
@@ -124,6 +125,11 @@ deriving it from the event name when older clients do not send the field.
 | `chip` | `Apple M1` | Safe | Performance benchmarking across chip types |
 | `country` | `US` | From CF header | Cloudflare provides this; we don't store IP |
 | `surface` | `gui` / `cli` | Safe | Separates menu-bar app sessions from one-shot CLI invocations |
+| `git_commit` (props) | `ca13604b4c7b` | Safe | Short git SHA or `unknown`. Copied into props because D1 does not persist extra envelope columns. |
+| `build_number` (props) | `20260913.1` | Safe | `CFBundleVersion` / env build identity, charset-limited |
+
+Queued events also receive these two props so agents can group failures by
+exact binary, not marketing version alone.
 
 ### What We Explicitly DON'T Collect
 
@@ -197,6 +203,12 @@ Local `os.Logger` lines are still useful for developer triage and user-supplied
 diagnostics, especially audio/runtime edge cases. They are not the canonical
 analytics source and should not replace a corresponding `*_operation` event
 when the question is "what happened to this operation?"
+
+`audio_engine_lifecycle` is a separate diagnostic event for the shared
+microphone engine. Its optional `slow` checkpoint and terminal snapshot do not
+add product operations or change their failure-rate denominators. Its
+`attempt_id` joins the two lifecycle snapshots; it is not an `operation_id`,
+`workflow_id`, meeting ID, or user identifier.
 
 ### 1. App Lifecycle — "Who's using this?"
 
@@ -374,7 +386,7 @@ prompt-customization trend.
 | `meeting_recording_completed` | `duration_seconds`, `live_word_count`, `live_transcript_lagged` | Recording duration and live-preview quality |
 | `meeting_recording_cancelled` | `duration_seconds` | How often recordings are intentionally discarded |
 | `meeting_recording_failed` | `error_type` | What blocks recording/finalization |
-| `meeting_operation` | `operation_id`, `workflow_id`, `parent_operation_id`, `outcome`, `trigger`, `stage`, `duration_seconds`, `live_word_count`, `live_transcript_lagged`, `microphone_track_present`, `system_track_present`, `notes_used`, `notes_length_bucket`, `error_type` | One wide outcome event for the full meeting capture + transcription flow |
+| `meeting_operation` | `operation_id`, `workflow_id`, `parent_operation_id`, `outcome`, `trigger`, `stage`, `duration_seconds`, `live_word_count`, `live_transcript_lagged`, `microphone_track_present`, `system_track_present`, `notes_used`, `notes_length_bucket`, `error_type`, `capture_start_completed` | One wide outcome event for the full meeting capture + transcription flow |
 | `vad_model_prep` | `outcome` (`prepared`, `failed`) | Whether launch-time Silero VAD model prep is reaching the installed base in flag-on VAD live-chunking builds |
 
 `meeting_operation.stage` values are `permissions`, `start_recording`,
@@ -383,6 +395,9 @@ prompt-customization trend.
 `meeting_operation.trigger` values include `manual`, `hotkey`,
 `calendar_auto_start`, and `auto_stop`; `meeting_recording_started.trigger`
 does not use `auto_stop` because auto-stop only affects the stop/finalize path.
+`capture_start_completed` is `false` when start recording fails without a
+recording output, `true` when an output exists, and omitted for earlier
+permission-only terminals.
 
 ### 5. Settings & Customization — "How do people configure the app?"
 
@@ -436,6 +451,80 @@ does not use `auto_stop` because auto-stop only affects the stop/finalize path.
 | Event | Props | Question It Answers |
 |---|---|---|
 | `mic_stall_detected` | First row per recording: `signature` (`mic_missing`, `mic_silent`, `mic_gap`), `elapsed_ms`, `stall_count`. Summary rows: `stall_count`, `total_stalled_seconds`. | Which confirmed mic-health failure pattern first occurred while system audio was active, with repeated stalls suppressed into periodic/final summaries so noisy sessions do not flood production telemetry |
+
+### 5e. Microphone engine lifecycle
+
+Implemented in the development source; availability in the stable app requires
+a release after the paired website allowlist deployment. This event observes
+the shared microphone used by dictation and meetings, including idle preparation.
+It does not observe ScreenCaptureKit's separate system-audio lifecycle.
+
+| Event | Props | Question It Answers |
+|---|---|---|
+| `audio_engine_lifecycle` | `attempt_id`, `operation`, `outcome`, `phase`, `elapsed_ms`, `phase_ms`, `attempt_count`, `prepared`, `vpio`, `buffer_size`, `route_source`, `transport`, `was_slow`; optional `last_error_type`, `last_error_phase`, `workflow_id`, `consumer`, `git_commit`, `build_number`, and observed `phase_<phase>_ms` fields | Which engine lifecycle boundary is still pending, how long each phase took, whether fallback or cancellation eventually resolved it, and which meeting/dictation workflow owned capture |
+
+`AudioEngineLifecycleDiagnostics` starts its independent utility timer before
+start, prepare, or stop waits for the platform's serial queue. A recovery
+observer starts when each recovery attempt begins, excluding the episode's
+scheduled backoff. The observer snapshots only locked diagnostic state; it
+does not call native audio APIs or run on an audio render callback.
+
+The emission policy is bounded per lifecycle call:
+
+- A still-pending call can emit one `outcome=slow` checkpoint at or after five
+  elapsed seconds. Scheduling can run late. This observes delay; it is not a
+  terminal failure, a hard timeout, or permission to cancel/restart the engine.
+- When start/recovery returns, it emits one terminal `success`, `failure`, or
+  `cancelled` snapshot. A Swift `CancellationError` or the platform's
+  `startupCancelled` is `cancelled`.
+- Prepare/stop emit lifecycle snapshots only when slow, including failures and
+  cancellations. Fast idle work therefore does not flood either sink.
+- A call that ends at or beyond the threshold before the timer runs emits only
+  its terminal snapshot with `was_slow=true`. A checkpoint followed by a
+  terminal retains the same `attempt_id` and separate envelope `event_id`s.
+  Repeated finishes and late timer callbacks emit nothing further.
+
+Both sinks receive the same immutable safe fields:
+
+| Field | Meaning and allowed values |
+|---|---|
+| `attempt_id` | Fresh random UUID for one lifecycle call, including its route fallbacks; each recovery attempt gets its own ID. No persistence or meeting/product-operation linkage. |
+| `operation` | `start`, `prepare`, `recovery`, `stop` |
+| `outcome` | `slow` checkpoint; terminal `success`, `failure`, or `cancelled` |
+| `phase` | Last entered boundary: `queue_wait`, `route_resolution`, `set_device`, `input_node`, `voice_processing`, `ducking`, `input_format`, `install_tap`, `prepare_engine`, `start_engine`, `first_buffer`, `validate_route`, `teardown`, `ready` |
+| `elapsed_ms`, `phase_ms` | Nonnegative integer milliseconds from monotonic uptime: whole lifecycle and current uninterrupted phase visit respectively. No wall-clock subtraction. |
+| `phase_<phase>_ms` | Cumulative milliseconds across visits to an observed phase, including the current visit. Unvisited phases are omitted; each duration truncates to whole milliseconds. |
+| `attempt_count` | Number of route attempts within this lifecycle, including a prepared-engine reuse attempt. Zero before an attempt starts. |
+| `prepared` | Whether the latest route attempt used the prepared-engine path; false before an attempt starts. |
+| `vpio`, `buffer_size` | Requested voice-processing flag and buffer frame count. Stop has no start request and reports `false`/`0`; these are not measured device capabilities. |
+| `route_source` | `selected`, `system_default`, `built_in`, or `unknown`, describing the latest attempted route. |
+| `transport` | `none`, `built-in`, `bluetooth`, `bluetooth-le`, `usb`, `aggregate`, `virtual`, `unknown`; aggregate members use `aggregate-` followed by a category other than `none`. Unknown/arbitrary labels become `unknown`. |
+| `last_error_type`, `last_error_phase` | Latest explicitly recorded attempt error and its originating boundary. The terminal error fills these fields only if no attempt error was recorded. Fallback may ultimately throw a different error or succeed while retaining the latest attempt error. No free-form error text. |
+| `was_slow` | True if a checkpoint was emitted or elapsed time reached the threshold by completion. |
+| `workflow_id` | Optional parent product workflow UUID, stamped from process-wide capture correlation before the audio queue. Matches `meeting_operation` / `dictation_operation` `workflow_id`. Omitted for idle prepare/stop. |
+| `consumer` | Optional `meeting` or `dictation`. Omitted when no capture correlation is active. |
+| `git_commit`, `build_number` | Added when the snapshot is queued as a telemetry event. Hex SHA or `unknown`; charset-limited build identity. Not a user identifier. |
+
+The snapshot schema stays at most 31 props; queued events may add build identity
+for a still-bounded total under the 40-property ingestion ceiling.
+It contains no audio, transcript, device name/UID, path, or persistent identity.
+`phase` locates the last instrumented boundary; it does not prove what caused a
+native hang. A success reports that this lifecycle call returned successfully,
+not the quality or completeness of a recording.
+
+A separate serial emission queue preserves checkpoint-before-terminal order
+outside the diagnostic state lock. It asynchronously appends a sorted
+`audio_engine_lifecycle key=value ...` line to the local audio log and enqueues
+the typed telemetry event under the existing consent and delivery policy.
+Neither path is durable delivery: delayed queues, opt-out, process termination,
+or transport rejection can leave evidence missing. A checkpoint without a
+terminal is unresolved evidence, not a counted failure or proof of an ongoing
+hang. Keep these diagnostic rows out of canonical product-operation totals.
+
+Deploy the paired `macparakeet-website` ingestion allowlist first. An older
+Worker returns permanent HTTP 400 for a batch containing this unknown event;
+the client drops that entire rejected batch, including otherwise valid product
+events. Source tests cannot establish production ingestion support.
 
 ### 6. Licensing — "Is the business working?"
 
