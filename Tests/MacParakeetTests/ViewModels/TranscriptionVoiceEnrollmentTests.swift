@@ -57,6 +57,9 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
     private let assignment: SpeakerManualAssignment
     private let assignError: Error?
     private let holdsAssign: Bool
+    /// Parks only this voice's answer, so a second one can overtake it and the
+    /// two outcomes land in the reverse of the order they were asked for.
+    private let holdsAssignFor: UUID?
 
     init(
         candidate: SpeakerClusterObservation?,
@@ -69,12 +72,14 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         voices: [EnrolledVoice] = [],
         assignment: SpeakerManualAssignment = .unknownProfile,
         assignError: Error? = nil,
-        holdsAssign: Bool = false
+        holdsAssign: Bool = false,
+        holdsAssignFor: UUID? = nil
     ) {
         self.voices = voices
         self.assignment = assignment
         self.assignError = assignError
         self.holdsAssign = holdsAssign
+        self.holdsAssignFor = holdsAssignFor
         self.candidate = candidate
         self.enrollment = enrollment
         self.mergeEnrollment = mergeEnrollment
@@ -139,7 +144,7 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         lock.lock()
         storedAssignments.append((profileId, speakerId))
         let outcome = assignment
-        let parks = holdsAssign
+        let parks = holdsAssign || holdsAssignFor == profileId
         lock.unlock()
         if parks { await waitForRelease() }
         if let assignError { throw assignError }
@@ -906,7 +911,52 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
         XCTAssertNil(viewModel.voiceEnrollmentMessage)
     }
 
+    /// Two voices named at once, answered in the reverse order: each outcome
+    /// says whose answer it is, so the banner renders under the speaker that
+    /// produced it rather than under whoever was asked about last.
+    func testOutOfOrderAnswersEachNameTheirOwnSpeaker() async throws {
+        let transcription = twoSpeakerTranscription()
+        let sarah = knownVoice(named: "Sarah")
+        let nadia = knownVoice(named: "Nadia")
+        let service = StubVoiceprintService(
+            candidate: observation(),
+            voices: [sarah, nadia],
+            assignment: .assigned(sarah.profile),
+            holdsAssignFor: sarah.profile.id
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+        try await waitUntil { viewModel.enrolledVoices.count == 2 }
+
+        viewModel.assignKnownVoice(profileId: sarah.profile.id, toSpeakerId: "S1")
+        try await waitUntil { !service.assignments.isEmpty }
+        viewModel.assignKnownVoice(profileId: nadia.profile.id, toSpeakerId: "S2")
+
+        try await waitUntil { viewModel.voiceEnrollmentMessage?.speakerId == "S2" }
+        service.releaseHeldSuggestions()
+        try await waitUntil { viewModel.voiceEnrollmentMessage?.speakerId == "S1" }
+        XCTAssertEqual(
+            viewModel.voiceEnrollmentMessage?.text, "This speaker is recorded as Sarah."
+        )
+    }
+
     // MARK: Helpers
+
+    private func twoSpeakerTranscription() -> Transcription {
+        var transcription = makeTranscription()
+        transcription.wordTimestamps = [
+            WordTimestamp(word: "hello", startMs: 0, endMs: 400, confidence: 0.9, speakerId: "S1"),
+            WordTimestamp(word: "there", startMs: 450, endMs: 800, confidence: 0.9, speakerId: "S2"),
+        ]
+        transcription.speakers = [
+            SpeakerInfo(id: "S1", label: "Others 1"),
+            SpeakerInfo(id: "S2", label: "Others 2"),
+        ]
+        transcription.diarizationSegments = [
+            .init(speakerId: "S1", startMs: 0, endMs: 400),
+            .init(speakerId: "S2", startMs: 450, endMs: 800),
+        ]
+        return transcription
+    }
 
     private func knownVoice(named name: String) -> EnrolledVoice {
         EnrolledVoice(

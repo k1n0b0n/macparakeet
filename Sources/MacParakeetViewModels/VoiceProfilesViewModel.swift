@@ -142,6 +142,7 @@ public final class VoiceProfilesViewModel {
     /// voices stored that the user asked to delete.
     public func forgetSelected() async {
         guard let service else { return }
+        let attempted = selectedProfileIDs.count
         var failed = 0
         for profileId in selectedProfileIDs {
             do {
@@ -154,7 +155,13 @@ public final class VoiceProfilesViewModel {
         await load()
         if failed > 0 {
             let noun = failed == 1 ? "voice" : "voices"
-            errorMessage = "Could not forget \(failed) \(noun). The rest were removed."
+            // Nothing was removed when every deletion failed, and telling the
+            // user otherwise on a biometric-deletion path claims a privacy
+            // guarantee the store did not give.
+            errorMessage =
+                failed == attempted
+                ? "Could not forget \(failed) \(noun)."
+                : "Could not forget \(failed) \(noun). The rest were removed."
         }
     }
 

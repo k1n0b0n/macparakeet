@@ -552,27 +552,13 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         // The same reservation `evaluate` applies to its own suggestions. The
         // manual path must not be the way around it: two speakers wearing one
         // name in a single transcript is a state nothing downstream can undo.
-        let existingLinks = try profiles.links(
-            transcriptionId: transcriptionId, fingerprint: fingerprint.rawValue
-        )
-        if let holder = existingLinks.first(where: {
-            $0.profileId == profileId && $0.status == .confirmed && $0.speakerId != speakerId
-        }) {
-            return .profileAlreadyUsed(bySpeakerId: holder.speakerId)
-        }
-
-        // Resolved here, never taken from the caller — see `confirm`.
-        let observation = try candidates.candidate(
-            transcriptionId: transcriptionId,
-            speakerId: speakerId,
-            fingerprint: fingerprint.rawValue,
-            now: now()
-        )?.observation
-
-        // Replaces whatever this speaker carried, a dismissal included: the
-        // contract stops a re-evaluation from overruling an answer, not the
-        // person who gave it from changing their mind.
-        try profiles.replaceUserDecision(
+        // The store checks and records under one write, because two people
+        // named from the same voice at once would each find it free here.
+        //
+        // The write replaces whatever this speaker carried, a dismissal
+        // included: the contract stops a re-evaluation from overruling an
+        // answer, not the person who gave it from changing their mind.
+        if let holder = try profiles.claimProfile(
             SpeakerProfileLink(
                 transcriptionId: transcriptionId,
                 speakerId: speakerId,
@@ -584,7 +570,17 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
                 createdAt: now(),
                 updatedAt: now()
             )
-        )
+        ) {
+            return .profileAlreadyUsed(bySpeakerId: holder)
+        }
+
+        // Resolved here, never taken from the caller — see `confirm`.
+        let observation = try candidates.candidate(
+            transcriptionId: transcriptionId,
+            speakerId: speakerId,
+            fingerprint: fingerprint.rawValue,
+            now: now()
+        )?.observation
 
         // Kept even when this voice sits far from everything the profile holds:
         // that distance is why the matcher stayed quiet, and it is what a changed

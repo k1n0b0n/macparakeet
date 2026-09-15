@@ -79,6 +79,12 @@ public protocol SpeakerProfileRepositoryProtocol: Sendable {
     /// choice: the guard protects an answer from the matcher, not from the
     /// person who gave it.
     func replaceUserDecision(_ link: SpeakerProfileLink) throws
+    /// Reserves `link.profileId` for `link.speakerId` and records the decision
+    /// in the same transaction, returning the speaker that already holds the
+    /// profile instead when there is one — nothing is written in that case.
+    /// A holder check made outside the write lets two concurrent assignments
+    /// both find the voice free and confirm it for different speakers.
+    func claimProfile(_ link: SpeakerProfileLink) throws -> String?
     /// Replaces pending offers for one run atomically, preserving terminal choices.
     /// Returns the offers still allowed after checking current terminal decisions.
     func replaceSuggestions(
@@ -416,6 +422,39 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
             try SpeakerTranscriptionRecord(
                 record: link, column: "transcriptionId", transcriptionKey: key
             ).save(db)
+        }
+    }
+
+    /// `replaceUserDecision` guarded by the one-voice-per-transcript rule, both
+    /// under a single write. The scope is this fingerprint, like every other
+    /// link query: rows from an earlier diarization describe speakers that no
+    /// longer exist.
+    public func claimProfile(_ link: SpeakerProfileLink) throws -> String? {
+        try dbQueue.write { db in
+            var link = link
+            let key = try SpeakerTranscriptionPersistence.key(link.transcriptionId, in: db)
+            let scope =
+                SpeakerProfileLink
+                .filter(Column("transcriptionId") == key)
+                .filter(Column("transcriptFingerprint") == link.transcriptFingerprint)
+            if let holder =
+                try scope
+                .filter(Column("profileId") == link.profileId)
+                .filter(Column("status") == SpeakerProfileLink.Status.confirmed.rawValue)
+                .filter(Column("speakerId") != link.speakerId)
+                .fetchOne(db)
+            {
+                return holder.speakerId
+            }
+            // Kept as in `replaceUserDecision`: the row dates this speaker's
+            // first decision, not the latest answer about them.
+            if let existing = try scope.filter(Column("speakerId") == link.speakerId).fetchOne(db) {
+                link.createdAt = existing.createdAt
+            }
+            try SpeakerTranscriptionRecord(
+                record: link, column: "transcriptionId", transcriptionKey: key
+            ).save(db)
+            return nil
         }
     }
 

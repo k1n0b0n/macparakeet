@@ -944,6 +944,57 @@ final class SpeakerProfileRepositoryTests: XCTestCase {
         )
     }
 
+    /// The reservation and the decision commit together. Read from outside the
+    /// write, the holder check lets two speakers named from one voice at the
+    /// same time both find it free and both confirm it.
+    func testClaimingAVoiceAnotherSpeakerHoldsRecordsNothing() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let transcription = try savedTranscription()
+        var first = link(transcriptionId: transcription.id, profileId: profile.id)
+        first.status = .confirmed
+        XCTAssertNil(try repo.claimProfile(first))
+
+        let second = SpeakerProfileLink(
+            transcriptionId: transcription.id,
+            speakerId: "system:S2",
+            transcriptFingerprint: "fingerprint",
+            profileId: profile.id,
+            status: .confirmed,
+            distance: SpeakerProfileLink.manualDecisionDistance,
+            runnerUpDistance: nil
+        )
+
+        XCTAssertEqual(try repo.claimProfile(second), "system:S1")
+        let stored = try repo.links(transcriptionId: transcription.id, fingerprint: "fingerprint")
+        XCTAssertEqual(stored.map(\.speakerId), ["system:S1"])
+    }
+
+    /// The same speaker answering again is not a conflict, and the row keeps
+    /// dating their first decision rather than their latest one.
+    func testReclaimingAVoiceForItsOwnSpeakerKeepsTheOriginalCreationTime() throws {
+        let profile = try enrolledProfile(named: "Sarah")
+        let transcription = try savedTranscription()
+        let decidedAt = Date(timeIntervalSince1970: 1_000_000)
+        var first = link(transcriptionId: transcription.id, profileId: profile.id)
+        first.status = .confirmed
+        first.createdAt = decidedAt
+        first.updatedAt = decidedAt
+        XCTAssertNil(try repo.claimProfile(first))
+
+        var again = link(transcriptionId: transcription.id, profileId: profile.id)
+        again.status = .confirmed
+        XCTAssertNil(try repo.claimProfile(again))
+
+        let stored = try XCTUnwrap(
+            try repo.links(transcriptionId: transcription.id, fingerprint: "fingerprint").first
+        )
+        XCTAssertEqual(
+            stored.createdAt.timeIntervalSince1970,
+            decidedAt.timeIntervalSince1970,
+            accuracy: 0.001
+        )
+    }
+
     func testProfileLookupHandlesNonAsciiCase() throws {
         // SQLite's NOCASE folds only ASCII, so this is the case that would
         // silently create a second profile for the same person.

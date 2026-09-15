@@ -317,6 +317,25 @@ final class VoiceProfilesViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.errorMessage, "Could not forget 1 voice. The rest were removed.")
     }
 
+    /// Nothing was removed, so the message must not promise that the rest were:
+    /// on a biometric-deletion path that reads as a privacy guarantee the store
+    /// never gave.
+    func testBulkDeletionThatFailsEntirelyClaimsNoRemovals() async {
+        let sarah = voice(named: "Sarah")
+        let nadia = voice(named: "Nadia")
+        let service = StubAdminService(
+            voices: [sarah, nadia], forgetFailsFor: [sarah.id, nadia.id]
+        )
+        let viewModel = VoiceProfilesViewModel(service: service)
+        await viewModel.load()
+        viewModel.selectedProfileIDs = [sarah.id, nadia.id]
+
+        await viewModel.forgetSelected()
+
+        XCTAssertTrue(service.forgotten.isEmpty)
+        XCTAssertEqual(viewModel.errorMessage, "Could not forget 2 voices.")
+    }
+
     func testATakenNameIsReportedInPlainLanguage() async {
         let sarah = voice(named: "Sarah")
         let service = StubAdminService(

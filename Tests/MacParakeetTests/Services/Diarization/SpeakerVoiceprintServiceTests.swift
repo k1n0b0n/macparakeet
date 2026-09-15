@@ -1966,6 +1966,9 @@ private final class NameHidingStore: SpeakerProfileRepositoryProtocol, @unchecke
     func replaceUserDecision(_ link: SpeakerProfileLink) throws {
         try wrapped.replaceUserDecision(link)
     }
+    func claimProfile(_ link: SpeakerProfileLink) throws -> String? {
+        try wrapped.claimProfile(link)
+    }
     func replaceSuggestions(
         transcriptionId: UUID, fingerprint: String, with links: [SpeakerProfileLink]
     ) throws -> [SpeakerProfileLink] {

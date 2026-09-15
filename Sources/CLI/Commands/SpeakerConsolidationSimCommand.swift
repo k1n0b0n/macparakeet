@@ -66,6 +66,11 @@ struct SpeakerConsolidationSimCommand: AsyncParsableCommand {
         guard let mode = Linkage(rawValue: linkage) else {
             throw ValidationError("Unknown linkage '\(linkage)'. Use single or average.")
         }
+        // The spans are written from the comparison pass, so on its own the
+        // flag reports success and leaves no file where the caller asked for one.
+        guard dumpSpans == nil || compare != nil else {
+            throw ValidationError("--dump-spans requires --compare: the spans are written by the comparison pass.")
+        }
 
         let constraint: SpeakerDiarizationConstraint? = speakers.map { .exact($0) }
         let service = DiarizationService()

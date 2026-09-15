@@ -2238,6 +2238,11 @@ public final class TranscriptionViewModel {
 
         public let text: String
         public let kind: Kind
+        /// Whose answer this reports. Carried by the message rather than held
+        /// beside it: two answers can be in flight at once, and the later one
+        /// would otherwise decide where the earlier one's outcome is shown.
+        /// `nil` renders at the top of the transcript.
+        public let speakerId: String?
     }
 
     /// What the user is being offered, or the outcome of what they accepted.
@@ -2387,7 +2392,8 @@ public final class TranscriptionViewModel {
                               self?.speakerAttribution?.fingerprint == fingerprint
                         else { return }
                         self?.voiceEnrollmentMessage = .init(
-                            text: "Could not record that name.", kind: .failure
+                            text: "Could not record that name.", kind: .failure,
+                            speakerId: speakerId
                         )
                     }
                 }
@@ -2413,17 +2419,20 @@ public final class TranscriptionViewModel {
             // who already carried that name still records the decision, and
             // without this the menu would look like it did nothing.
             voiceEnrollmentMessage = .init(
-                text: "This speaker is recorded as \(displayName).", kind: .success
+                text: "This speaker is recorded as \(displayName).", kind: .success,
+                speakerId: speakerId
             )
         case .profileAlreadyUsed(let holderId):
             let holder = speakerAttribution?.speakers.first { $0.id == holderId }?.label ?? holderId
             voiceEnrollmentMessage = .init(
                 text: "\(holder) is already \(displayName) in this transcript, so the voice was not recorded.",
-                kind: .failure
+                kind: .failure,
+                speakerId: speakerId
             )
         case .unknownProfile:
             voiceEnrollmentMessage = .init(
-                text: "\(displayName)'s voice is no longer stored.", kind: .failure
+                text: "\(displayName)'s voice is no longer stored.", kind: .failure,
+                speakerId: speakerId
             )
         }
     }
@@ -2476,7 +2485,8 @@ public final class TranscriptionViewModel {
                               self?.speakerAttribution?.fingerprint == fingerprint
                         else { return }
                         self?.voiceEnrollmentMessage = .init(
-                            text: "Could not record that confirmation.", kind: .failure
+                            text: "Could not record that confirmation.", kind: .failure,
+                            speakerId: suggestion.speakerId
                         )
                     }
                 }
@@ -2508,7 +2518,8 @@ public final class TranscriptionViewModel {
                     else { return }
                     self?.voiceSuggestions.append(suggestion)
                     self?.voiceEnrollmentMessage = .init(
-                        text: "Could not record that answer.", kind: .failure
+                        text: "Could not record that answer.", kind: .failure,
+                        speakerId: suggestion.speakerId
                     )
                 }
             }
@@ -2652,7 +2663,8 @@ public final class TranscriptionViewModel {
                           self?.speakerAttribution?.fingerprint == offer.fingerprint
                     else { return }
                     self?.voiceEnrollmentMessage = .init(
-                        text: "Could not remember this voice.", kind: .failure
+                        text: "Could not remember this voice.", kind: .failure,
+                        speakerId: offer.speakerId
                     )
                 }
             }
@@ -2669,17 +2681,29 @@ public final class TranscriptionViewModel {
         else { return }
         switch outcome {
         case .created, .addedExemplar:
-            voiceEnrollmentMessage = .init(text: "\(offer.displayName)'s voice will be suggested in later meetings.", kind: .success)
+            voiceEnrollmentMessage = .init(
+                text: "\(offer.displayName)'s voice will be suggested in later meetings.",
+                kind: .success, speakerId: offer.speakerId
+            )
         case .alreadySampled:
-            voiceEnrollmentMessage = .init(text: "\(offer.displayName) already has a sample from this recording.", kind: .success)
+            voiceEnrollmentMessage = .init(
+                text: "\(offer.displayName) already has a sample from this recording.",
+                kind: .success, speakerId: offer.speakerId
+            )
         case .needsDisambiguation:
             // Deliberately not phrased as an error: the likeliest cause is two
             // people who share a first name, which is not a mistake.
             voiceEnrollmentConflict = offer
         case .rejectedTooShort:
-            voiceEnrollmentMessage = .init(text: "Not enough speech from \(offer.displayName) to remember their voice.", kind: .failure)
+            voiceEnrollmentMessage = .init(
+                text: "Not enough speech from \(offer.displayName) to remember their voice.",
+                kind: .failure, speakerId: offer.speakerId
+            )
         case .rejectedProfileFull:
-            voiceEnrollmentMessage = .init(text: "\(offer.displayName) already has the maximum number of voice samples.", kind: .failure)
+            voiceEnrollmentMessage = .init(
+                text: "\(offer.displayName) already has the maximum number of voice samples.",
+                kind: .failure, speakerId: offer.speakerId
+            )
         case .rejectedEmptyName:
             voiceEnrollmentMessage = nil
         }

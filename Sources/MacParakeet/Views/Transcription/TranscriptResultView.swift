@@ -555,10 +555,6 @@ struct TranscriptResultView: View {
     /// rendered against the control that produced it, so it lands in the part
     /// of the transcript the user is already looking at.
     @State private var voiceProfileRenameContexts: [String: String] = [:]
-    /// The speaker whose answer the outcome message belongs to, captured when
-    /// the user answers rather than read back from the view model: the message
-    /// itself carries only its text.
-    @State private var voiceProfileMessageSpeakerID: String?
     @State private var editingSpeakers = false
     @State private var speakerSelection = SpeakerEditSelectionModel()
     @State private var showingNewSpeakerPrompt = false
@@ -813,7 +809,6 @@ struct TranscriptResultView: View {
         // Speaker ids are positional, so a context kept across transcripts
         // would anchor a prompt to whoever happens to be `S1` here.
         voiceProfileRenameContexts.removeAll()
-        voiceProfileMessageSpeakerID = nil
         editingSpeakers = false
         speakerSelection.clear()
         showingNewSpeakerPrompt = false
@@ -4014,7 +4009,7 @@ struct TranscriptResultView: View {
             }
         }
         if let message = viewModel.voiceEnrollmentMessage {
-            let messagePlacement = voiceProfileMessageSpeakerID
+            let messagePlacement = message.speakerId
                 .map(voiceProfileBannerPlacement(forSpeaker:)) ?? .transcriptTop
             if messagePlacement == placement { set.message = message }
         }
@@ -4060,13 +4055,11 @@ struct TranscriptResultView: View {
             Spacer()
 
             Button("Not \(suggestion.displayName)") {
-                voiceProfileMessageSpeakerID = suggestion.speakerId
                 viewModel.dismissVoiceSuggestion(suggestion)
             }
             .parakeetAction(.secondary)
             .controlSize(.small)
             Button("Yes") {
-                voiceProfileMessageSpeakerID = suggestion.speakerId
                 viewModel.confirmVoiceSuggestion(suggestion)
             }
             .parakeetAction(.primary)
@@ -4111,7 +4104,6 @@ struct TranscriptResultView: View {
                 .parakeetAction(.secondary)
                 .controlSize(.small)
             Button("Remember") {
-                voiceProfileMessageSpeakerID = offer.speakerId
                 viewModel.confirmVoiceEnrollment()
             }
             .parakeetAction(.primary)
@@ -4150,7 +4142,6 @@ struct TranscriptResultView: View {
                 .parakeetAction(.secondary)
                 .controlSize(.small)
             Button("Same Person") {
-                voiceProfileMessageSpeakerID = offer.speakerId
                 viewModel.confirmVoiceEnrollment(allowMerge: true)
             }
             .parakeetAction(.secondary)
@@ -4618,7 +4609,6 @@ struct TranscriptResultView: View {
         // an unplaced message lands.
         voiceProfileRenameContexts[speakerId] =
             SpeakerRenameAccessibility.overviewRenameContextIdentifier(for: speakerId)
-        voiceProfileMessageSpeakerID = speakerId
         viewModel.assignKnownVoice(profileId: profileId, toSpeakerId: speakerId)
     }
 
@@ -4947,7 +4937,6 @@ struct TranscriptResultView: View {
         // Remembered before the offer lands: it arrives asynchronously, by
         // which time the editor that produced it is gone.
         voiceProfileRenameContexts[draft.speakerID] = draft.contextID
-        voiceProfileMessageSpeakerID = draft.speakerID
         if transcriptDisplayMode == .timed {
             scheduleSegmentCacheRebuild()
         }
