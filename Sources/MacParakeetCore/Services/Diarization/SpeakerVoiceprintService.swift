@@ -19,6 +19,16 @@ public enum SpeakerProfileEnrollment: Sendable, Equatable {
     case rejectedProfileFull(SpeakerProfile)
 }
 
+/// What happened when the user named a speaker themselves.
+public enum SpeakerManualAssignment: Sendable, Equatable {
+    case assigned(SpeakerProfile)
+    /// Another speaker in this same transcript is already confirmed as this
+    /// profile. One voice cannot be two people in one meeting.
+    case profileAlreadyUsed(bySpeakerId: String)
+    /// Deleted between the menu being built and the choice being made.
+    case unknownProfile
+}
+
 /// One enrolled voice, as the administration surface needs to show it.
 ///
 /// Carries the diagnostic fields deliberately: "this profile never matches" is
@@ -107,6 +117,23 @@ public protocol SpeakerVoiceprintServicing: Sendable {
         transcriptionId: UUID,
         fingerprint: TranscriptFingerprint
     ) async throws
+
+    /// Records a name the user chose rather than one the matcher proposed.
+    /// The label is written by the correction layer, as with `confirm`.
+    func assign(
+        profileId: UUID,
+        toSpeakerId speakerId: String,
+        transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint
+    ) async throws -> SpeakerManualAssignment
+
+    /// Which voice each speaker already holds in this version of the
+    /// transcript, keyed by profile. A menu that keeps offering a voice
+    /// another speaker holds is offering what `assign` will refuse.
+    func confirmedVoiceHolders(
+        transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint
+    ) async throws -> [UUID: String]
 
     /// Every enrolled voice with what the administration surface needs to
     /// explain it, including why one may never be matching.
@@ -505,6 +532,104 @@ public final class SpeakerVoiceprintService: SpeakerVoiceprintServicing, @unchec
         profile.lastMatchedAt = now()
         profile.updatedAt = now()
         try profiles.save(profile)
+    }
+
+    /// Same ordering as `confirm`, with two differences the store can see: there
+    /// was no score, so the link carries the sentinel, and the sample it keeps is
+    /// a manual enrollment rather than an accepted suggestion. Choosing a name
+    /// from a list of enrolled voices is the same claim as typing that name into
+    /// the enrollment field. Calibration must still be able to tell a decision
+    /// from a measurement, which is what the sentinel is for.
+    public func assign(
+        profileId: UUID,
+        toSpeakerId speakerId: String,
+        transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint
+    ) async throws -> SpeakerManualAssignment {
+        guard isEnabled() else { throw SpeakerVoiceprintServiceError.disabled }
+        guard var profile = try profiles.profile(id: profileId) else { return .unknownProfile }
+
+        // The same reservation `evaluate` applies to its own suggestions. The
+        // manual path must not be the way around it: two speakers wearing one
+        // name in a single transcript is a state nothing downstream can undo.
+        let existingLinks = try profiles.links(
+            transcriptionId: transcriptionId, fingerprint: fingerprint.rawValue
+        )
+        if let holder = existingLinks.first(where: {
+            $0.profileId == profileId && $0.status == .confirmed && $0.speakerId != speakerId
+        }) {
+            return .profileAlreadyUsed(bySpeakerId: holder.speakerId)
+        }
+
+        // Resolved here, never taken from the caller — see `confirm`.
+        let observation = try candidates.candidate(
+            transcriptionId: transcriptionId,
+            speakerId: speakerId,
+            fingerprint: fingerprint.rawValue,
+            now: now()
+        )?.observation
+
+        // Replaces whatever this speaker carried, a dismissal included: the
+        // contract stops a re-evaluation from overruling an answer, not the
+        // person who gave it from changing their mind.
+        try profiles.replaceUserDecision(
+            SpeakerProfileLink(
+                transcriptionId: transcriptionId,
+                speakerId: speakerId,
+                transcriptFingerprint: fingerprint.rawValue,
+                profileId: profileId,
+                status: .confirmed,
+                distance: SpeakerProfileLink.manualDecisionDistance,
+                runnerUpDistance: nil,
+                createdAt: now(),
+                updatedAt: now()
+            )
+        )
+
+        // Kept even when this voice sits far from everything the profile holds:
+        // that distance is why the matcher stayed quiet, and it is what a changed
+        // microphone or a hoarse morning sounds like. The two anchors `confirm`
+        // demands do not apply here — the person naming the speaker is the
+        // anchor. Only the duration guard survives, because it judges signal
+        // rather than identity.
+        if let observation, observation.speechSeconds >= policy.minSpeechSecondsToEnroll {
+            switch try addExemplar(
+                to: profile,
+                observation: observation,
+                origin: .manualEnrollment,
+                transcriptionId: transcriptionId
+            ) {
+            case .inserted, .insertedEvicting:
+                try consumeCandidate(
+                    transcriptionId: transcriptionId,
+                    speakerId: speakerId,
+                    fingerprint: fingerprint
+                )
+            case .rejectedAlreadySampled, .rejectedProfileFull:
+                break
+            }
+        }
+
+        profile.lastMatchedAt = now()
+        profile.updatedAt = now()
+        try profiles.save(profile)
+        return .assigned(profile)
+    }
+
+    public func confirmedVoiceHolders(
+        transcriptionId: UUID,
+        fingerprint: TranscriptFingerprint
+    ) async throws -> [UUID: String] {
+        // Empty rather than thrown: this only feeds a menu, and that menu is
+        // already gone when the feature is off.
+        guard isEnabled() else { return [:] }
+        let links = try profiles.links(
+            transcriptionId: transcriptionId, fingerprint: fingerprint.rawValue
+        )
+        return links.reduce(into: [:]) { holders, link in
+            guard link.status == .confirmed else { return }
+            holders[link.profileId] = link.speakerId
+        }
     }
 
     public func dismiss(

@@ -22,8 +22,10 @@ merging into `main` does not establish meeting accuracy or authorize release.
   exemplars, links, enrollment candidates and the match journal.
 - `AppEnvironment` supplies feature/preference gating and starts
   `SpeakerVoiceprintRetention` maintenance.
-  Planned enrollment and suggestion UI must call the gated service; ordinary
-  speaker renames continue through the speaker-correction layer.
+  Enrollment, suggestion and manual-assignment UI must call the gated service;
+  ordinary speaker renames continue through the speaker-correction layer. Naming
+  a speaker from the list of enrolled voices is one of those calls: it records a
+  link, never a label.
 - Export, CLI JSON, diagnostics, feedback/support bundles and external AI context
   are not consumers of the voiceprint tables. They may use transcript labels
   explicitly applied through the existing correction path.
@@ -56,6 +58,15 @@ The future opt-in UI must disclose candidate retention before the first write.
   both sides. Unknown or ambiguous voices may remain unnamed. Suggestions never
   rename a transcript automatically; confirmation uses the existing correction
   path, and profile links carry identity provenance separately.
+- A manual assignment is a human decision, not a measurement: the user picks an
+  enrolled voice for a speaker the matcher did not propose one for. It takes the
+  same correction path as a confirmation, and it cannot give one profile to two
+  speakers of the same transcript — the reservation applied to suggestions holds
+  for it too. It learns on different terms: the sample is stored as a manual
+  enrollment and needs no anchors, because choosing a name from the enrolled
+  voices is the same claim as typing that name into the enrollment field. How far
+  the chosen voice sits from the profile's existing samples is deliberately not a
+  gate — that distance is why no suggestion was made.
 - Current policy is experimental: cosine distance `tau = 0.25`, margin `0.10`,
   minimum cluster speech of 3 seconds to match and 15 seconds to enroll, learn
   from a confirmation or retain a candidate. A shorter match can still be
@@ -78,7 +89,7 @@ Migrations `v0.39-speaker-voiceprints`, `v0.40-speaker-match-journal` and
 |-------|-------------------------|
 | `speaker_profiles` | Explicitly enrolled identities; retained until deletion. |
 | `speaker_profile_exemplars` | Profile-owned 1024-byte vectors with model/aggregation identity, duration, capture domain and enrollment origin. At most one exemplar per profile per source recording; at most 10 under current policy. |
-| `speaker_profile_links` | Suggested, confirmed or dismissed identities scoped to transcription ID, speaker ID and transcript fingerprint. Re-evaluation must not overwrite a terminal decision. |
+| `speaker_profile_links` | Suggested, confirmed or dismissed identities scoped to transcription ID, speaker ID and transcript fingerprint. Re-evaluation must not overwrite a terminal decision; only an explicit user action may replace one. A link recording a manual assignment carries a documented sentinel distance outside the cosine range, so calibration can exclude a choice that was never scored. |
 | `speaker_embedding_candidates` | Consent-gated temporary voices for later enrollment, scoped to the same transcript/speaker/fingerprint. Never compared against each other or read as references by the matcher. |
 | `speaker_match_journal` | Local decision distances, outcomes and references; no vectors or independent identity labels. Supports calibration, not automatic ground truth. |
 
@@ -100,7 +111,9 @@ its exemplar is persisted. A rejected insertion, including a profile filled with
 manual enrollments, preserves the candidate for its remaining retention window. A
 confirmed label does not imply a sample was learned: confirmation-driven learning
 requires two manual enrollment anchors and must respect the duration, cap and
-model rules. Re-evaluation replaces pending suggestions for that transcript
+model rules. Assignment-driven learning requires no anchors and stores a manual
+enrollment, under those same duration, cap, one-sample-per-recording and model
+rules. Re-evaluation replaces pending suggestions for that transcript
 fingerprint while preserving confirmed and dismissed choices.
 Journal outcomes describe scoring, not proof that an offer was displayed: a
 concurrent terminal choice may suppress publication after the score was computed.
@@ -150,6 +163,16 @@ preferences or stale observations, consent prerequisites, fingerprint isolation,
 candidate preservation after rejected insertion, expiry without new meetings,
 deletion cascades and transcript-label preservation. Flag verification must also
 check that a release build ignores the DEBUG override.
+
+Manual assignment must be covered on both sides of the boundary:
+`SpeakerVoiceprintServiceTests` for the sentinel distance, the sample kept as a
+manual enrollment however far the chosen voice sits from the profile, the
+duration gate, a profile already held by another speaker of the same transcript,
+replacing an earlier dismissal and the disabled gate; `TranscriptionVoiceEnrollmentTests` for
+the write order, a refused rename recording nothing, and abandonment when the
+fingerprint changed. `VoiceProfilesViewModelTests` must pin that the management
+surface is offered after a failed read, since hiding it would leave stored
+biometric data unreachable.
 
 Outward-boundary verification must exercise populated voiceprint tables against
 the app and CLI export projections. Inspect feedback and diagnostic builders for

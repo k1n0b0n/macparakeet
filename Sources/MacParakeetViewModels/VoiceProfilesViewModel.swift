@@ -36,12 +36,27 @@ public final class VoiceProfilesViewModel {
 
     public var isEmpty: Bool { !isLoading && voices.isEmpty }
 
+    /// True once a `load()` has run to completion, successfully or not.
+    public private(set) var hasLoaded = false
+    /// True when the last `load()` could not read the store.
+    public private(set) var loadFailed = false
+
+    /// Whether the management surface must be offered. Fails open: when the
+    /// store could not be read, offer deletion rather than hide it. Hiding it
+    /// on a read error is the one outcome this feature must never produce —
+    /// biometric data with no way to remove it.
+    public var hasEnrolledVoices: Bool { !voices.isEmpty || loadFailed }
+
     public func load() async {
         guard let service else { return }
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            hasLoaded = true
+        }
         do {
             voices = try await service.enrolledVoices()
+            loadFailed = false
             // A successful read clears the last failure: leaving it would show
             // current data beside an error that no longer applies.
             errorMessage = nil
@@ -52,6 +67,7 @@ public final class VoiceProfilesViewModel {
             selectedProfileIDs.formIntersection(live)
             samplesByProfile = samplesByProfile.filter { live.contains($0.key) }
         } catch {
+            loadFailed = true
             errorMessage = "Could not read the stored voices."
         }
     }

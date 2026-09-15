@@ -151,6 +151,8 @@ public final class TranscriptionViewModel {
                 dismissVoiceEnrollment()
                 voiceEnrollmentMessage = nil
                 voiceSuggestions = []
+                enrolledVoices = []
+                voiceHolders = [:]
             }
             if let currentTranscription {
                 loadSpeakerAttribution(for: currentTranscription)
@@ -2019,6 +2021,11 @@ public final class TranscriptionViewModel {
                     transcriptionID: transcriptionID,
                     fingerprint: projection.attribution.fingerprint
                 )
+                self.loadEnrolledVoices()
+                self.loadVoiceHolders(
+                    transcriptionID: transcriptionID,
+                    fingerprint: projection.attribution.fingerprint
+                )
                 if let current = self.currentTranscription, current.id == transcriptionID {
                     self.reofferVoiceEnrollment(for: current)
                 }
@@ -2247,6 +2254,25 @@ public final class TranscriptionViewModel {
     /// an answer. Never applied on their own.
     public internal(set) var voiceSuggestions: [SpeakerVoiceprintSuggestion] = []
 
+    /// Voices already enrolled, offered as names the user can pick for a
+    /// speaker the matcher did not recognise. Empty whenever the feature is
+    /// off — the service is `nil` then — so the menu hides itself.
+    public internal(set) var enrolledVoices: [EnrolledVoice] = []
+
+    /// Which speaker already holds each voice in this version of the
+    /// transcript. Unlike `enrolledVoices`, this belongs to one transcript, so
+    /// it carries that scope's guards.
+    public internal(set) var voiceHolders: [UUID: String] = [:]
+
+    /// The voices still worth offering here: everything enrolled, minus every
+    /// voice already placed in this transcript. `assign` refuses a voice another
+    /// speaker holds, and a speaker offered the voice it already carries is
+    /// offered a decision that has been made — both read as a menu that does
+    /// nothing.
+    public var assignableVoices: [EnrolledVoice] {
+        enrolledVoices.filter { voiceHolders[$0.profile.id] == nil }
+    }
+
     public func dismissVoiceEnrollment() {
         pendingVoiceEnrollment = nil
         voiceEnrollmentConflict = nil
@@ -2276,6 +2302,129 @@ public final class TranscriptionViewModel {
                 else { return }
                 self?.voiceSuggestions = offers ?? []
             }
+        }
+    }
+
+    /// Not scoped to a transcript — a voice belongs to the library, not to one
+    /// recording — so the token alone guards it: a slower earlier read must not
+    /// overwrite the list an assignment just refreshed.
+    private var enrolledVoicesLoadToken = 0
+
+    /// Scoped to a transcript, so it needs what `loadVoiceSuggestions` needs:
+    /// a token against a slower earlier read, and both identifiers against a
+    /// transcript that moved underneath it.
+    private var voiceHoldersLoadToken = 0
+
+    private func loadVoiceHolders(
+        transcriptionID: UUID, fingerprint: TranscriptFingerprint
+    ) {
+        guard let speakerVoiceprints else { return }
+        voiceHoldersLoadToken &+= 1
+        let token = voiceHoldersLoadToken
+        Task { [weak self] in
+            let holders = try? await speakerVoiceprints.confirmedVoiceHolders(
+                transcriptionId: transcriptionID, fingerprint: fingerprint
+            )
+            await MainActor.run {
+                guard self?.voiceHoldersLoadToken == token,
+                      self?.currentTranscription?.id == transcriptionID,
+                      self?.speakerAttribution?.fingerprint == fingerprint
+                else { return }
+                self?.voiceHolders = holders ?? [:]
+            }
+        }
+    }
+
+    private func loadEnrolledVoices() {
+        guard let speakerVoiceprints else { return }
+        enrolledVoicesLoadToken &+= 1
+        let token = enrolledVoicesLoadToken
+        Task { [weak self] in
+            let voices = try? await speakerVoiceprints.enrolledVoices()
+            await MainActor.run {
+                guard self?.enrolledVoicesLoadToken == token else { return }
+                self?.enrolledVoices = voices ?? []
+            }
+        }
+    }
+
+    /// The manual counterpart of `confirmVoiceSuggestion`, for a speaker the
+    /// matcher never proposed a name for. It keeps that method's order for the
+    /// same reason: the label goes through the correction layer first, and the
+    /// link is written only once that label is committed.
+    public func assignKnownVoice(profileId: UUID, toSpeakerId speakerId: String) {
+        guard let speakerVoiceprints,
+              let transcriptionId = currentTranscription?.id,
+              let fingerprint = speakerAttribution?.fingerprint,
+              let voice = enrolledVoices.first(where: { $0.profile.id == profileId })
+        else { return }
+        let displayName = voice.profile.displayName
+        renameSpeaker(
+            id: speakerId,
+            to: displayName,
+            offersEnrollment: false
+        ) { [weak self] committed in
+            // Nothing to record: the transcript never took the name, so a link
+            // would point at a speaker the user does not see under it.
+            guard committed else { return }
+            Task { [weak self] in
+                do {
+                    let outcome = try await speakerVoiceprints.assign(
+                        profileId: profileId,
+                        toSpeakerId: speakerId,
+                        transcriptionId: transcriptionId,
+                        fingerprint: fingerprint
+                    )
+                    await MainActor.run {
+                        guard self?.currentTranscription?.id == transcriptionId,
+                              self?.speakerAttribution?.fingerprint == fingerprint
+                        else { return }
+                        self?.publish(outcome, named: displayName, for: speakerId)
+                    }
+                } catch {
+                    await MainActor.run {
+                        guard self?.currentTranscription?.id == transcriptionId,
+                              self?.speakerAttribution?.fingerprint == fingerprint
+                        else { return }
+                        self?.voiceEnrollmentMessage = .init(
+                            text: "Could not record that name.", kind: .failure
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// The rename has already happened in every branch, so these say what
+    /// became of the voice, not of the label.
+    private func publish(
+        _ outcome: SpeakerManualAssignment, named displayName: String, for speakerId: String
+    ) {
+        switch outcome {
+        case .assigned(let profile):
+            // An offer for this speaker is now answered by a stronger signal
+            // than the one it was asking about.
+            voiceSuggestions.removeAll { $0.speakerId == speakerId }
+            loadEnrolledVoices()
+            // Recorded here rather than re-read: the menu must stop offering
+            // this voice on the next open, not one round trip later.
+            voiceHolders[profile.id] = speakerId
+            // Said even though the label may not have moved: naming a speaker
+            // who already carried that name still records the decision, and
+            // without this the menu would look like it did nothing.
+            voiceEnrollmentMessage = .init(
+                text: "This speaker is recorded as \(displayName).", kind: .success
+            )
+        case .profileAlreadyUsed(let holderId):
+            let holder = speakerAttribution?.speakers.first { $0.id == holderId }?.label ?? holderId
+            voiceEnrollmentMessage = .init(
+                text: "\(holder) is already \(displayName) in this transcript, so the voice was not recorded.",
+                kind: .failure
+            )
+        case .unknownProfile:
+            voiceEnrollmentMessage = .init(
+                text: "\(displayName)'s voice is no longer stored.", kind: .failure
+            )
         }
     }
 

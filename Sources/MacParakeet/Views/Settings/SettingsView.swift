@@ -1304,12 +1304,18 @@ struct SettingsView: View {
                     rememberSpeakersRow
                 }
 
-                // The management row is gated by neither. A build where the
-                // flag is off can still be sitting on voices enrolled while it
-                // was on — a DEBUG session with `--enable-voice-profiles`, then
-                // a normal launch — and biometric data with no way to delete it
-                // is the one outcome this feature must never produce.
-                voiceProfilesManagementRow
+                // The management row answers to the flag *or* to voices being
+                // stored. A build where the flag is off can still be sitting on
+                // voices enrolled while it was on — a DEBUG session with
+                // `--enable-voice-profiles`, then a normal launch — and
+                // biometric data with no way to delete it is the one outcome
+                // this feature must never produce. Someone with neither sees no
+                // administration row for a feature they do not have.
+                if AppFeatures.isVoiceProfilesAvailable()
+                    || voiceProfilesViewModel.hasEnrolledVoices
+                {
+                    voiceProfilesManagementRow
+                }
 
                 Divider()
 
@@ -1350,6 +1356,12 @@ struct SettingsView: View {
                     }
                 }
             }
+        }
+        // On the card, never on the row above: that row is conditional on what
+        // this load finds, so loading from there would leave it hidden forever
+        // for exactly the people it exists to serve.
+        .task {
+            await voiceProfilesViewModel.load()
         }
     }
 

@@ -74,6 +74,11 @@ public protocol SpeakerProfileRepositoryProtocol: Sendable {
     /// Rows from an earlier fingerprint are deliberately invisible here.
     func links(transcriptionId: UUID, fingerprint: String) throws -> [SpeakerProfileLink]
     func save(_ link: SpeakerProfileLink) throws
+    /// Replaces a decision the user made themselves, terminal ones included.
+    /// Separate from `save`, which still refuses to overwrite a terminal
+    /// choice: the guard protects an answer from the matcher, not from the
+    /// person who gave it.
+    func replaceUserDecision(_ link: SpeakerProfileLink) throws
     /// Replaces pending offers for one run atomically, preserving terminal choices.
     /// Returns the offers still allowed after checking current terminal decisions.
     func replaceSuggestions(
@@ -385,6 +390,29 @@ public final class SpeakerProfileRepository: SpeakerProfileRepositoryProtocol {
                 }
                 link.createdAt = existing.createdAt
             }
+            try SpeakerTranscriptionRecord(
+                record: link, column: "transcriptionId", transcriptionKey: key
+            ).save(db)
+        }
+    }
+
+    /// No terminal guard, by design. Re-evaluation must never overwrite an
+    /// answer, but the user changing their mind is the one case that must
+    /// stay repairable — a misclicked refusal would otherwise lock a speaker
+    /// out of naming for this fingerprint for good.
+    public func replaceUserDecision(_ link: SpeakerProfileLink) throws {
+        try dbQueue.write { db in
+            var link = link
+            let key = try SpeakerTranscriptionPersistence.key(link.transcriptionId, in: db)
+            let existing =
+                try SpeakerProfileLink
+                .filter(Column("transcriptionId") == key)
+                .filter(Column("speakerId") == link.speakerId)
+                .filter(Column("transcriptFingerprint") == link.transcriptFingerprint)
+                .fetchOne(db)
+            // Kept as in `save`: the row dates this speaker's first decision,
+            // not the latest answer about them.
+            if let existing { link.createdAt = existing.createdAt }
             try SpeakerTranscriptionRecord(
                 record: link, column: "transcriptionId", transcriptionKey: key
             ).save(db)

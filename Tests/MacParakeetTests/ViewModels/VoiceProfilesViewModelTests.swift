@@ -9,6 +9,7 @@ private final class StubAdminService: SpeakerVoiceprintServicing, @unchecked Sen
     private var storedVoices: [EnrolledVoice]
     private var storedSamples: [UUID: [SpeakerProfileExemplar]]
     private let renameError: Error?
+    private let listError: Error?
     private let refusesLastSample: Bool
     private let forgetFailsFor: Set<UUID>
 
@@ -33,17 +34,24 @@ private final class StubAdminService: SpeakerVoiceprintServicing, @unchecked Sen
         voices: [EnrolledVoice],
         samples: [UUID: [SpeakerProfileExemplar]] = [:],
         renameError: Error? = nil,
+        listError: Error? = nil,
         refusesLastSample: Bool = false,
         forgetFailsFor: Set<UUID> = []
     ) {
         self.storedVoices = voices
         self.storedSamples = samples
         self.renameError = renameError
+        self.listError = listError
         self.refusesLastSample = refusesLastSample
         self.forgetFailsFor = forgetFailsFor
     }
 
+    func confirmedVoiceHolders(
+        transcriptionId _: UUID, fingerprint _: TranscriptFingerprint
+    ) async throws -> [UUID: String] { [:] }
+
     func enrolledVoices() async throws -> [EnrolledVoice] {
+        if let listError { throw listError }
         lock.lock(); defer { lock.unlock() }
         return storedVoices
     }
@@ -127,6 +135,10 @@ private final class StubAdminService: SpeakerVoiceprintServicing, @unchecked Sen
         _: SpeakerVoiceprintSuggestion, transcriptionId _: UUID,
         fingerprint _: TranscriptFingerprint
     ) async throws {}
+    func assign(
+        profileId _: UUID, toSpeakerId _: String, transcriptionId _: UUID,
+        fingerprint _: TranscriptFingerprint
+    ) async throws -> SpeakerManualAssignment { .unknownProfile }
 }
 
 @MainActor
@@ -157,6 +169,50 @@ final class VoiceProfilesViewModelTests: XCTestCase {
 
         XCTAssertTrue(viewModel.isEmpty)
         XCTAssertTrue(viewModel.voices.isEmpty)
+    }
+
+    // MARK: Offering the management surface
+
+    /// The settings row asks this before the first read finishes. Answering
+    /// "yes" then would show a row that a load may immediately take away.
+    func testNoVoicesAreClaimedBeforeLoading() {
+        let viewModel = VoiceProfilesViewModel(service: StubAdminService(voices: [voice(named: "Sarah")]))
+
+        XCTAssertFalse(viewModel.hasLoaded)
+        XCTAssertFalse(viewModel.hasEnrolledVoices)
+    }
+
+    func testStoredVoicesAreClaimedAfterLoading() async {
+        let viewModel = VoiceProfilesViewModel(service: StubAdminService(voices: [voice(named: "Sarah")]))
+
+        await viewModel.load()
+
+        XCTAssertTrue(viewModel.hasLoaded)
+        XCTAssertTrue(viewModel.hasEnrolledVoices)
+    }
+
+    /// Fails open. A store that cannot be read may still hold voices, and
+    /// hiding the only surface that deletes them would leave biometric data
+    /// with no way out — the one outcome this feature must never produce.
+    func testAFailedReadStillOffersTheManagementSurface() async {
+        struct Boom: Error {}
+        let viewModel = VoiceProfilesViewModel(
+            service: StubAdminService(voices: [], listError: Boom())
+        )
+
+        await viewModel.load()
+
+        XCTAssertTrue(viewModel.loadFailed)
+        XCTAssertTrue(viewModel.hasEnrolledVoices)
+    }
+
+    func testAnEmptyStoreOffersNoManagementSurface() async {
+        let viewModel = VoiceProfilesViewModel(service: StubAdminService(voices: []))
+
+        await viewModel.load()
+
+        XCTAssertTrue(viewModel.hasLoaded)
+        XCTAssertFalse(viewModel.hasEnrolledVoices)
     }
 
     /// Built without a service when the feature is unavailable. It must show an

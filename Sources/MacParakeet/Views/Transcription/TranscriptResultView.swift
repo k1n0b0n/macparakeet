@@ -4609,6 +4609,19 @@ struct TranscriptResultView: View {
         viewModel.applySpeakerCorrection(.assign(targets: targets, to: assignment))
     }
 
+    /// Scoped to the whole speaker, not the turn the menu was opened from: a
+    /// voice link is keyed by speaker, and naming one turn Marie while the
+    /// rest stay "Speaker 2" is not what the menu says it does.
+    private func assignKnownVoice(_ speakerId: String, _ profileId: UUID) {
+        // Sends the outcome to this speaker's overview row — the menu it was
+        // chosen from — instead of the top of the transcript, which is where
+        // an unplaced message lands.
+        voiceProfileRenameContexts[speakerId] =
+            SpeakerRenameAccessibility.overviewRenameContextIdentifier(for: speakerId)
+        voiceProfileMessageSpeakerID = speakerId
+        viewModel.assignKnownVoice(profileId: profileId, toSpeakerId: speakerId)
+    }
+
     private func presentNewSpeaker(for segments: [SpeakerEditableSegment]) {
         pendingNewSpeakerSegments = segments
         let next = (viewModel.speakerAttribution?.speakers.count ?? 0) + 1
@@ -4751,6 +4764,19 @@ struct TranscriptResultView: View {
                                         for: speaker.id
                                     )
                                 )
+                            }
+
+                            // Sits beside the other whole-speaker actions because
+                            // that is its scope: the name applies everywhere this
+                            // speaker talks, not to one turn.
+                            if !viewModel.assignableVoices.isEmpty {
+                                Menu("This speaker is…") {
+                                    ForEach(viewModel.assignableVoices, id: \.id) { voice in
+                                        Button(voice.profile.displayName) {
+                                            assignKnownVoice(speaker.id, voice.profile.id)
+                                        }
+                                    }
+                                }
                             }
 
                             Menu("Merge into…") {

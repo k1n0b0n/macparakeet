@@ -37,6 +37,12 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
 
     private var storedConfirmed: [String] = []
     private var storedDismissed: [String] = []
+    private var storedAssignments: [(UUID, String)] = []
+
+    var assignments: [(UUID, String)] {
+        lock.lock(); defer { lock.unlock() }
+        return storedAssignments
+    }
 
     var confirmed: [String] {
         lock.lock(); defer { lock.unlock() }
@@ -47,6 +53,11 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         return storedDismissed
     }
 
+    private let voices: [EnrolledVoice]
+    private let assignment: SpeakerManualAssignment
+    private let assignError: Error?
+    private let holdsAssign: Bool
+
     init(
         candidate: SpeakerClusterObservation?,
         enrollment: SpeakerProfileEnrollment = .rejectedEmptyName,
@@ -54,8 +65,16 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         enrollError: Error? = nil,
         suggestions: [SpeakerVoiceprintSuggestion] = [],
         heldForTranscription: UUID? = nil,
-        dismissFails: Bool = false
+        dismissFails: Bool = false,
+        voices: [EnrolledVoice] = [],
+        assignment: SpeakerManualAssignment = .unknownProfile,
+        assignError: Error? = nil,
+        holdsAssign: Bool = false
     ) {
+        self.voices = voices
+        self.assignment = assignment
+        self.assignError = assignError
+        self.holdsAssign = holdsAssign
         self.candidate = candidate
         self.enrollment = enrollment
         self.mergeEnrollment = mergeEnrollment
@@ -109,6 +128,24 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
         lock.unlock()
     }
 
+    /// Records the call before parking on `holdsAssign`, so a test can see the
+    /// write start, move the transcript underneath it, and then let it finish.
+    func assign(
+        profileId: UUID,
+        toSpeakerId speakerId: String,
+        transcriptionId _: UUID,
+        fingerprint _: TranscriptFingerprint
+    ) async throws -> SpeakerManualAssignment {
+        lock.lock()
+        storedAssignments.append((profileId, speakerId))
+        let outcome = assignment
+        let parks = holdsAssign
+        lock.unlock()
+        if parks { await waitForRelease() }
+        if let assignError { throw assignError }
+        return outcome
+    }
+
     /// `heldForTranscription` parks the answer for one recording so a later
     /// selection can land first, which is the only way to exercise the
     /// in-flight guard deterministically.
@@ -157,8 +194,19 @@ private final class StubVoiceprintService: SpeakerVoiceprintServicing, @unchecke
 
     struct DismissFailed: Error {}
 
+    /// Who already holds each voice in the transcript under test. Set before
+    /// the view model loads, so the menu filter has something to hide.
+    var holders: [UUID: String] = [:]
+
+    func confirmedVoiceHolders(
+        transcriptionId _: UUID, fingerprint _: TranscriptFingerprint
+    ) async throws -> [UUID: String] {
+        lock.lock(); defer { lock.unlock() }
+        return holders
+    }
+
     // Administration is exercised in its own suite; these are unused here.
-    func enrolledVoices() async throws -> [EnrolledVoice] { [] }
+    func enrolledVoices() async throws -> [EnrolledVoice] { voices }
     func samples(profileId _: UUID) async throws -> [SpeakerProfileExemplar] { [] }
     func renameProfile(id _: UUID, to _: String) async throws {}
     func deleteSample(id _: UUID, profileId _: UUID) async throws -> Bool { false }
@@ -747,7 +795,130 @@ final class TranscriptionVoiceEnrollmentTests: XCTestCase {
         XCTAssertNil(viewModel.errorMessage)
     }
 
+    // MARK: Naming a speaker from a known voice
+
+    /// The rename goes through the correction layer first; the link is written
+    /// only once that label is persisted. Nothing is offered for enrollment
+    /// either: the voice picked is already stored.
+    func testNamingASpeakerFromAKnownVoiceRecordsTheLinkAfterTheRename() async throws {
+        let transcription = makeTranscription()
+        let voice = knownVoice(named: "Sarah")
+        let service = StubVoiceprintService(
+            candidate: observation(), voices: [voice], assignment: .assigned(voice.profile)
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+        try await waitUntil { !viewModel.enrolledVoices.isEmpty }
+
+        viewModel.assignKnownVoice(profileId: voice.profile.id, toSpeakerId: "S1")
+
+        try await waitUntil { !service.assignments.isEmpty }
+        XCTAssertEqual(service.assignments.first?.0, voice.profile.id)
+        XCTAssertEqual(service.assignments.first?.1, "S1")
+        XCTAssertTrue(service.candidateRequests.isEmpty)
+        XCTAssertNil(viewModel.pendingVoiceEnrollment)
+        // Naming a speaker who already carried that name moves no label, so
+        // the message is the only sign the decision was recorded.
+        try await waitUntil { viewModel.voiceEnrollmentMessage != nil }
+        XCTAssertEqual(viewModel.voiceEnrollmentMessage?.kind, .success)
+        XCTAssertEqual(
+            viewModel.voiceEnrollmentMessage?.text, "This speaker is recorded as Sarah."
+        )
+    }
+
+    /// One voice cannot be two people in one meeting — `assign` refuses it —
+    /// so a voice already placed here leaves every menu, the holder's own
+    /// included: a speaker offered the name it already carries is offered a
+    /// decision that has been made.
+    func testAVoiceAlreadyPlacedInTheTranscriptIsNoLongerOffered() async throws {
+        let transcription = makeTranscription()
+        let taken = knownVoice(named: "Sarah")
+        let free = knownVoice(named: "Marie")
+        let service = StubVoiceprintService(
+            candidate: observation(), voices: [taken, free], assignment: .assigned(taken.profile)
+        )
+        service.holders = [taken.profile.id: "S2"]
+        let viewModel = try await configured(transcription, voiceprints: service)
+
+        try await waitUntil { !viewModel.voiceHolders.isEmpty }
+        XCTAssertEqual(viewModel.assignableVoices.map(\.profile.displayName), ["Marie"])
+    }
+
+    /// Without this the voice stays offered until the transcript is reopened.
+    func testAnAssignedVoiceLeavesTheMenusAtOnce() async throws {
+        let transcription = makeTranscription()
+        let voice = knownVoice(named: "Sarah")
+        let service = StubVoiceprintService(
+            candidate: observation(), voices: [voice], assignment: .assigned(voice.profile)
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+        try await waitUntil { !viewModel.enrolledVoices.isEmpty }
+
+        viewModel.assignKnownVoice(profileId: voice.profile.id, toSpeakerId: "S1")
+
+        try await waitUntil { viewModel.voiceHolders[voice.profile.id] != nil }
+        XCTAssertTrue(viewModel.assignableVoices.isEmpty)
+    }
+
+    /// The opposite order would leave a profile taught a name the transcript
+    /// never took.
+    func testARefusedRenameRecordsNoVoiceAtAll() async throws {
+        let transcription = makeTranscription()
+        let voice = knownVoice(named: "Sarah")
+        let service = StubVoiceprintService(
+            candidate: observation(), voices: [voice], assignment: .assigned(voice.profile)
+        )
+        let viewModel = try await configured(
+            transcription, voiceprints: service, correctionFails: true
+        )
+        try await waitUntil { !viewModel.enrolledVoices.isEmpty }
+
+        viewModel.assignKnownVoice(profileId: voice.profile.id, toSpeakerId: "S1")
+
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertTrue(service.assignments.isEmpty)
+    }
+
+    /// A re-diarization keeps the transcription id and moves the speakers, so
+    /// the answer that comes back describes a transcript that no longer exists.
+    func testAnAnswerArrivingAfterAReDiarizationIsNotShown() async throws {
+        let transcription = makeTranscription()
+        let voice = knownVoice(named: "Sarah")
+        let service = StubVoiceprintService(
+            candidate: observation(),
+            voices: [voice],
+            assignment: .profileAlreadyUsed(bySpeakerId: "S2"),
+            holdsAssign: true
+        )
+        let viewModel = try await configured(transcription, voiceprints: service)
+        try await waitUntil { !viewModel.enrolledVoices.isEmpty }
+
+        viewModel.assignKnownVoice(profileId: voice.profile.id, toSpeakerId: "S1")
+        try await waitUntil { !service.assignments.isEmpty }
+        var rediarized = transcription
+        rediarized.wordTimestamps = [
+            WordTimestamp(word: "hello", startMs: 0, endMs: 400, confidence: 0.9, speakerId: "S2")
+        ]
+        viewModel.currentTranscription = rediarized
+        try await waitUntil { viewModel.speakerAttribution != nil }
+        service.releaseHeldSuggestions()
+
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertNil(viewModel.voiceEnrollmentMessage)
+    }
+
     // MARK: Helpers
+
+    private func knownVoice(named name: String) -> EnrolledVoice {
+        EnrolledVoice(
+            profile: SpeakerProfile(displayName: name, identity: identity),
+            sampleCount: 2,
+            maxSamples: 10,
+            recognizedCount: 1,
+            usesRetiredModel: false,
+            lastEvaluatedDistance: nil,
+            acceptanceThreshold: 0.25
+        )
+    }
 
     private func configured(
         _ transcription: Transcription,

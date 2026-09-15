@@ -1599,6 +1599,236 @@ final class SpeakerVoiceprintServiceTests: XCTestCase {
         XCTAssertTrue(try profiles.links(transcriptionId: recording.id, fingerprint: fingerprint.rawValue).isEmpty)
     }
 
+    // MARK: Manual assignment
+
+    /// 80° is far outside tau, so the matcher offers nothing — which is the
+    /// situation the manual path exists for, and that unreachable voice is
+    /// precisely the sample the profile was missing.
+    func testAssigningSamplesAYoungProfileWithTheVoiceItCouldNotMatch() async throws {
+        let recording = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: recording.id)
+        let next = try savedTranscription()
+        let service = makeService()
+        let offers = try await service.evaluate(
+            transcriptionId: next.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 80)]
+        )
+        XCTAssertTrue(offers.isEmpty)
+
+        let outcome = try await service.assign(
+            profileId: profile.id,
+            toSpeakerId: "S1",
+            transcriptionId: next.id,
+            fingerprint: fingerprint
+        )
+
+        guard case .assigned = outcome else {
+            return XCTFail("expected the assignment to be recorded")
+        }
+        let links = try profiles.links(transcriptionId: next.id, fingerprint: fingerprint.rawValue)
+        XCTAssertEqual(links.map(\.status), [.confirmed])
+        // No score was involved, and the sentinel says so rather than passing
+        // a fabricated 0.0 to calibration.
+        XCTAssertEqual(links.first?.distance, SpeakerProfileLink.manualDecisionDistance)
+        XCTAssertNil(links.first?.runnerUpDistance)
+        // A single enrollment anchored this profile, and that is enough here:
+        // the sample is recorded as another enrollment, not as a suggestion the
+        // matcher proposed.
+        let exemplars = try profiles.exemplars(profileId: profile.id)
+        XCTAssertEqual(exemplars.count, 2)
+        XCTAssertEqual(exemplars.filter { $0.origin == .manualEnrollment }.count, 2)
+        XCTAssertNotNil(try profiles.profile(id: profile.id)?.lastMatchedAt)
+    }
+
+    /// The gate that outlived the anchors. A cluster too short to enroll is too
+    /// short to teach, whoever named it — but the name is still recorded, since
+    /// how briefly someone spoke says nothing about who they are.
+    func testAssigningTooShortAClusterRecordsTheLinkWithoutLearning() async throws {
+        let recording = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: recording.id)
+        let next = try savedTranscription()
+        let service = makeService()
+        _ = try await service.evaluate(
+            transcriptionId: next.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 80, speechSeconds: 14.999)]
+        )
+
+        _ = try await service.assign(
+            profileId: profile.id,
+            toSpeakerId: "S1",
+            transcriptionId: next.id,
+            fingerprint: fingerprint
+        )
+
+        XCTAssertEqual(
+            try profiles.links(transcriptionId: next.id, fingerprint: fingerprint.rawValue)
+                .map(\.status),
+            [.confirmed]
+        )
+        XCTAssertEqual(try profiles.exemplars(profileId: profile.id).count, 1)
+    }
+
+    /// Spent once: a candidate left behind would let the same cluster teach the
+    /// profile twice.
+    func testAssigningConsumesTheCandidateItLearnedFrom() async throws {
+        let first = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: first.id)
+        let second = try savedTranscription()
+        let service = makeService()
+        _ = try await service.enroll(
+            displayName: "Sarah",
+            observation: cluster("S1", voice: 0, degrees: 14.1),
+            transcriptionId: second.id,
+            fingerprint: fingerprint,
+            allowMergeIntoExistingName: false
+        )
+
+        let third = try savedTranscription()
+        _ = try await service.evaluate(
+            transcriptionId: third.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 80)]
+        )
+        _ = try await service.assign(
+            profileId: profile.id,
+            toSpeakerId: "S1",
+            transcriptionId: third.id,
+            fingerprint: fingerprint
+        )
+
+        let exemplars = try profiles.exemplars(profileId: profile.id)
+        XCTAssertEqual(exemplars.count, 3)
+        XCTAssertTrue(exemplars.allSatisfy { $0.origin == .manualEnrollment })
+        XCTAssertNil(
+            try candidates.candidate(
+                transcriptionId: third.id, speakerId: "S1",
+                fingerprint: fingerprint.rawValue, now: Date()
+            )
+        )
+    }
+
+    /// The reservation `evaluate` applies to its own suggestions. One voice
+    /// cannot be two people in one meeting, whoever proposed the name.
+    func testAssigningRefusesAVoiceAnotherSpeakerAlreadyHolds() async throws {
+        let recording = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: recording.id)
+        let next = try savedTranscription()
+        let service = makeService()
+        _ = try await service.evaluate(
+            transcriptionId: next.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 80), cluster("S2", voice: 1, degrees: 80)]
+        )
+        _ = try await service.assign(
+            profileId: profile.id, toSpeakerId: "S1",
+            transcriptionId: next.id, fingerprint: fingerprint
+        )
+
+        let outcome = try await service.assign(
+            profileId: profile.id, toSpeakerId: "S2",
+            transcriptionId: next.id, fingerprint: fingerprint
+        )
+
+        guard case .profileAlreadyUsed(let holder) = outcome else {
+            return XCTFail("expected the second speaker to be refused")
+        }
+        XCTAssertEqual(holder, "S1")
+        let links = try profiles.links(transcriptionId: next.id, fingerprint: fingerprint.rawValue)
+        XCTAssertFalse(links.contains { $0.speakerId == "S2" })
+    }
+
+    /// What the menu reads to stop offering a voice `assign` would refuse.
+    /// Scoring leaves `.suggested` links behind, and those refuse nothing, so
+    /// only an answered decision may take a voice out of the list.
+    func testHoldersReportAnsweredDecisionsAndNotScores() async throws {
+        let recording = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: recording.id)
+        let next = try savedTranscription()
+        let service = makeService()
+        _ = try await service.evaluate(
+            transcriptionId: next.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 80), cluster("S2", voice: 1, degrees: 80)]
+        )
+        _ = try await service.assign(
+            profileId: profile.id, toSpeakerId: "S1",
+            transcriptionId: next.id, fingerprint: fingerprint
+        )
+
+        let holders = try await service.confirmedVoiceHolders(
+            transcriptionId: next.id, fingerprint: fingerprint
+        )
+
+        XCTAssertEqual(holders, [profile.id: "S1"])
+    }
+
+    /// The contract stops a re-evaluation from overruling an answer, not the
+    /// person who gave it from changing their mind.
+    func testAUserChoiceReplacesTheirOwnEarlierRefusal() async throws {
+        let recording = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: recording.id)
+        let next = try savedTranscription()
+        let service = makeService()
+        let offers = try await service.evaluate(
+            transcriptionId: next.id,
+            fingerprint: fingerprint,
+            clusters: [cluster("S1", voice: 0, degrees: 14.1)]
+        )
+        try await service.dismiss(
+            try XCTUnwrap(offers.first), transcriptionId: next.id, fingerprint: fingerprint
+        )
+
+        _ = try await service.assign(
+            profileId: profile.id, toSpeakerId: "S1",
+            transcriptionId: next.id, fingerprint: fingerprint
+        )
+
+        let links = try profiles.links(transcriptionId: next.id, fingerprint: fingerprint.rawValue)
+        XCTAssertEqual(links.map(\.status), [.confirmed])
+        XCTAssertEqual(links.first?.distance, SpeakerProfileLink.manualDecisionDistance)
+    }
+
+    func testAssigningThrowsWhenDisabledAndLeavesLinksUntouched() async throws {
+        let recording = try savedTranscription()
+        let profile = try await enrolledSarah(transcriptionId: recording.id)
+        let next = try savedTranscription()
+
+        enabled = false
+        let disabled = makeService()
+        do {
+            _ = try await disabled.assign(
+                profileId: profile.id, toSpeakerId: "S1",
+                transcriptionId: next.id, fingerprint: fingerprint
+            )
+            XCTFail("expected a disabled refusal")
+        } catch SpeakerVoiceprintServiceError.disabled {
+        }
+
+        XCTAssertTrue(
+            try profiles.links(transcriptionId: next.id, fingerprint: fingerprint.rawValue).isEmpty
+        )
+    }
+
+    /// Deleted from the management sheet while the transcript menu was open.
+    func testAssigningAVoiceThatNoLongerExistsRecordsNothing() async throws {
+        let next = try savedTranscription()
+        let service = makeService()
+
+        let outcome = try await service.assign(
+            profileId: UUID(), toSpeakerId: "S1",
+            transcriptionId: next.id, fingerprint: fingerprint
+        )
+
+        guard case .unknownProfile = outcome else {
+            return XCTFail("expected the missing profile to be reported")
+        }
+        XCTAssertTrue(
+            try profiles.links(transcriptionId: next.id, fingerprint: fingerprint.rawValue).isEmpty
+        )
+    }
+
     // MARK: Helpers
 
     /// Reads `enabled` once, at construction: capturing it lazily would put the
@@ -1733,6 +1963,9 @@ private final class NameHidingStore: SpeakerProfileRepositoryProtocol, @unchecke
         try wrapped.links(transcriptionId: transcriptionId, fingerprint: fingerprint)
     }
     func save(_ link: SpeakerProfileLink) throws { try wrapped.save(link) }
+    func replaceUserDecision(_ link: SpeakerProfileLink) throws {
+        try wrapped.replaceUserDecision(link)
+    }
     func replaceSuggestions(
         transcriptionId: UUID, fingerprint: String, with links: [SpeakerProfileLink]
     ) throws -> [SpeakerProfileLink] {

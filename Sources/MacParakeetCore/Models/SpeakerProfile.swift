@@ -183,6 +183,13 @@ public struct SpeakerProfileLink: Codable, Sendable, Equatable {
     }
 }
 
+extension SpeakerProfileLink {
+    /// Written when a link records a human decision rather than a score.
+    /// Outside the cosine range, so calibration can exclude it instead of
+    /// reading a fabricated 0.0 as a perfect match.
+    public static let manualDecisionDistance: Double = -1
+}
+
 extension SpeakerProfileLink: FetchableRecord, PersistableRecord {
     public static let databaseTableName = "speaker_profile_links"
 }
