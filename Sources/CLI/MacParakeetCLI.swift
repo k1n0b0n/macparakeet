@@ -37,6 +37,7 @@ struct CLI: AsyncParsableCommand {
             MeetingsCommand.self,
             CalendarCommand.self,
             MeetingVADSimCommand.self,
+            SpeakerConsolidationSimCommand.self,
             FeedbackCommand.self,
         ],
         defaultSubcommand: nil
