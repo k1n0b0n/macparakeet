@@ -1,3 +1,4 @@
+import AVFoundation
 import FluidAudio
 import XCTest
 
@@ -19,6 +20,28 @@ final class DitheredAudioSampleSourceTests: XCTestCase {
 
         let samples = try read(source, offset: 0, count: 48_000)
 
+        XCTAssertFalse(samples.contains(0))
+        XCTAssertTrue(samples.allSatisfy { abs($0) <= Dithered.amplitude })
+    }
+
+    func testNoiseIsNeverExactlyZero() {
+        // The first index where the previous mapping produced exactly 0.
+        XCTAssertNotEqual(Dithered.noise(at: 26_849_042), 0)
+        XCTAssertFalse((0..<1_000_000).contains { Dithered.noise(at: $0) == 0 })
+    }
+
+    func testStagedFileOfDigitalSilenceIsDitheredAtSixteenKilohertz() throws {
+        let url = try writeSilentWav(sampleCount: 48_000, sampleRate: 48_000)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let (source, _) = try DitheredAudioSampleSource.staging(url, sampleRate: 16_000)
+        defer { source.cleanup() }
+        var samples = [Float](repeating: 0, count: source.sampleCount)
+        try samples.withUnsafeMutableBufferPointer {
+            try source.copySamples(into: $0.baseAddress!, offset: 0, count: $0.count)
+        }
+
+        XCTAssertEqual(source.sampleCount, 16_000, accuracy: 16)
         XCTAssertFalse(samples.contains(0))
         XCTAssertTrue(samples.allSatisfy { abs($0) <= Dithered.amplitude })
     }
@@ -53,5 +76,21 @@ final class DitheredAudioSampleSourceTests: XCTestCase {
             XCTAssertEqual(dithered, original, accuracy: Dithered.amplitude)
         }
         XCTAssertEqual(source.sampleCount, speech.count)
+    }
+
+    private func writeSilentWav(sampleCount: Int, sampleRate: Double) throws -> URL {
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: 1,
+            interleaved: false
+        )!
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).wav")
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(sampleCount))!
+        buffer.frameLength = AVAudioFrameCount(sampleCount)
+        try file.write(from: buffer)
+        return url
     }
 }
