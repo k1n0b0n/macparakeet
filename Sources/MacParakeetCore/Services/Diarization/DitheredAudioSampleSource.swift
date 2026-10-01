@@ -43,7 +43,7 @@ struct DitheredAudioSampleSource<Base: AudioSampleSource>: AudioSampleSource {
 }
 
 extension DitheredAudioSampleSource where Base == DiskBackedAudioSampleSource {
-    /// Stages `url` as mono 16 kHz samples in a memory-mapped temporary file,
+    /// Stages `url` as mono samples at `sampleRate` in a memory-mapped temporary file,
     /// as FluidAudio's own `process(_:)` does, and dithers them. The caller
     /// owns the staged file and must call `cleanup()`.
     static func staging(_ url: URL, sampleRate: Int) throws -> (source: Self, loadSeconds: TimeInterval) {
