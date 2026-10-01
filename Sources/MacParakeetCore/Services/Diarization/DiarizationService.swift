@@ -175,7 +175,15 @@ protocol OfflineDiarizerManaging: AnyObject, Sendable {
 
 extension OfflineDiarizerManager: OfflineDiarizerManaging {
     func process(audioURL: URL) async throws -> DiarizationResult {
-        try await process(audioURL)
+        let (source, loadSeconds) = try AudioSourceFactory().makeDiskBackedSource(
+            from: audioURL,
+            targetSampleRate: DiarizationService.highAccuracyConfig.segmentation.sampleRate
+        )
+        defer { source.cleanup() }
+        return try await process(
+            audioSource: DitheredAudioSampleSource(base: source),
+            audioLoadingSeconds: loadSeconds
+        )
     }
 }
 
