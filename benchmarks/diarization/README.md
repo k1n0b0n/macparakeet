@@ -106,6 +106,22 @@ recall, word accuracy, or precision; extra predicted activity is not penalized.
 The output lists any missing protocols, so a partial diagnostic cannot be
 mistaken for complete corpus coverage.
 
+Word attribution after `SpeakerMerger` uses the app's own ASR words. Transcribe
+each recording with `macparakeet-cli transcribe <wav> --no-diarize --no-history
+--mode raw --engine parakeet -f json --output-dir <asr>`, then:
+
+```sh
+python3 benchmarks/diarization/scripts/score_word_attribution.py \
+  --manifest benchmarks/diarization/manifests/ami-test.json \
+  --reference-root /path/to/ami/references --asr-root /path/to/asr \
+  --predictions nemotron=/path/to/results/nemotron
+```
+
+It scores each word against the reference speaker active over its whole span,
+under the merger's `raw`, `app` (as shipped) and `keep` (gaps filled, one-word
+turns kept) policies, by the length of the reference turn the word belongs to.
+Overlapped words and ASR errors are excluded; it is not cpWER.
+
 The opt-in `NemotronDiarizationE2ETests` exercises real ASR, source-separated
 meeting finalization, persistence, file transcription and model reuse. See its
 environment-variable instructions before running it. Normal tests do not
