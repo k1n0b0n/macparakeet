@@ -117,9 +117,11 @@ python3 benchmarks/diarization/scripts/score_word_attribution.py \
   --predictions nemotron=/path/to/results/nemotron
 ```
 
-Reference turns are RTTM intervals with touching intervals of one speaker
-merged; each word belongs to the turn holding its midpoint. Words touching two
-speakers, no reference speech or the outside of the UEM are skipped. Word text
+Reference turns are RTTM intervals with touching or overlapping intervals of
+one speaker merged; each word belongs to the turn holding its midpoint. Words
+touching two speakers, no reference speech or the outside of the UEM are
+skipped. One speaker mapping per recording, from the unsmoothed assignment,
+scores every policy. Word text
 is not compared with the reference, so ASR errors stay in; it is not cpWER. The
 merger runs under `raw`, `app` (as shipped) and `keep` (gaps filled, one-word
 turns kept) policies, and accuracy is reported by reference turn length.

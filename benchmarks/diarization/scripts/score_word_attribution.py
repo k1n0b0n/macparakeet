@@ -4,15 +4,18 @@
 Reference turns are the RTTM intervals with touching or overlapping intervals of
 the same speaker merged. Each ASR word belongs to the turn that holds its
 midpoint, and a turn's length is the number of ASR words it holds. A word is
-scored when it lies inside the UEM and touches exactly one reference speaker;
-words touching two speakers or no reference speech are skipped. Word text is
-never compared with the reference, so ASR recognition errors stay in.
+scored when it lies inside the UEM, its midpoint falls in a reference turn, and
+that turn's speaker is the only reference speaker it touches; other words are
+skipped. Word text is never compared with the reference, so ASR recognition
+errors stay in.
 
 Predicted segments are assigned to words by a copy of the app's SpeakerMerger,
 under three policies: `raw` (no smoothing), `app` (the merger as shipped: fill
 gaps and merge one-word flips) and `keep` (fill gaps only, to measure what the
 one-word merge costs). Predicted speakers map one-to-one to reference speakers
-by maximum agreement on scored words; a nil or unmapped word counts as wrong.
+by maximum agreement on the scored words of the `raw` assignment, and that one
+mapping scores every policy, so policies differ only by the words they change.
+A nil or unmapped word counts as wrong.
 Accuracy is reported by reference turn length, because one-word turns are the
 replies that smoothing can erase (#1046). Spurious switches count consecutive
 scored words of one reference turn that received different predicted speakers.
@@ -194,10 +197,17 @@ def bucket(length: int) -> str:
     return "1" if length == 1 else "2" if length == 2 else "3-5" if length <= 5 else "6+"
 
 
-def score(labels: list[Label | None], predicted: list[str | None]) -> dict:
+def speaker_mapping(labels: list[Label | None], predicted: list[str | None]) -> dict[str, str]:
+    return best_mapping(collections.Counter(
+        (pred, label.speaker) for label, pred in zip(labels, predicted, strict=True) if label and pred is not None
+    ))
+
+
+def score(labels: list[Label | None], predicted: list[str | None], mapping: dict[str, str] | None = None) -> dict:
+    """Scores `predicted`; `mapping` defaults to the best one for `predicted` itself."""
     scored = [(i, label, pred) for i, (label, pred) in enumerate(zip(labels, predicted, strict=True)) if label]
-    agreement = collections.Counter((pred, label.speaker) for _, label, pred in scored if pred is not None)
-    mapping = best_mapping(agreement)
+    if mapping is None:
+        mapping = speaker_mapping(labels, predicted)
     totals, correct = collections.Counter(), collections.Counter()
     for _, label, pred in scored:
         hit = mapping.get(pred) == label.speaker
@@ -238,8 +248,9 @@ def main() -> int:
             labels = label_words(words, read_rttm(args.reference_root / f"{rid}.rttm"),
                                  read_uem(args.reference_root / f"{rid}.uem"))
             segments = json.loads((Path(directory) / f"{rid}.json").read_text())["segments"]
+            mapping = speaker_mapping(labels, merge(words, segments, "raw"))
             for policy in POLICIES:
-                result = score(labels, merge(words, segments, policy))
+                result = score(labels, merge(words, segments, policy), mapping)
                 sums[policy].update({f"words:{k}": v for k, v in result["words"].items()})
                 sums[policy].update({f"correct:{k}": v for k, v in result["correct"].items()})
                 sums[policy].update(nil=result["nil"], spurious=result["spurious"])

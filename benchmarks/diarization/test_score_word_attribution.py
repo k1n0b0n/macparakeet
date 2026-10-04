@@ -98,6 +98,11 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(result["spurious"], 1)
         self.assertEqual(score([Label("A", 0, 1), Label("A", 1, 1)], ["S1", "S2"])["spurious"], 0)
 
+    def test_a_fixed_mapping_scores_policies_on_the_same_terms(self):
+        labels = [Label("A", 0, 3), Label("A", 0, 3), Label("A", 0, 3)]
+        self.assertEqual(score(labels, ["S2", "S2", "S2"])["correct"]["all"], 3)
+        self.assertEqual(score(labels, ["S2", "S2", "S2"], {"S1": "A"})["correct"]["all"], 0)
+
     def test_nil_words_count_as_wrong(self):
         result = score([Label("A", 0, 2), Label("A", 0, 2)], ["S1", None])
         self.assertEqual(result["correct"]["all"], 1)
