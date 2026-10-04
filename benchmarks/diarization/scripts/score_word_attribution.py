@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """Word-level speaker attribution of saved diarization runs, on the app's ASR words.
 
-Each ASR word gets the reference speaker active over its whole span; a word that
-touches no reference speech, two speakers, or falls outside the UEM is not
-scored. Predicted segments are assigned to words by a copy of the app's
-SpeakerMerger, under three policies: `raw` (no smoothing), `app` (the merger as
-shipped: fill gaps and merge one-word flips) and `keep` (fill gaps only, to
-measure what the one-word merge costs). Predicted speakers map one-to-one to reference speakers by
-greedy agreement; a nil or unmapped word counts as wrong. Accuracy is reported
-by the length of the reference turn the word belongs to, because one-word turns
-are the replies that smoothing can erase (#1046).
+Reference turns are the RTTM intervals with touching or overlapping intervals of
+the same speaker merged. Each ASR word belongs to the turn that holds its
+midpoint, and a turn's length is the number of ASR words it holds. A word is
+scored when it lies inside the UEM and touches exactly one reference speaker;
+words touching two speakers or no reference speech are skipped. Word text is
+never compared with the reference, so ASR recognition errors stay in.
 
-This is not DER or cpWER: overlapped speech and ASR errors are excluded.
-No audio, inference, downloads, or third-party Python packages are needed.
+Predicted segments are assigned to words by a copy of the app's SpeakerMerger,
+under three policies: `raw` (no smoothing), `app` (the merger as shipped: fill
+gaps and merge one-word flips) and `keep` (fill gaps only, to measure what the
+one-word merge costs). Predicted speakers map one-to-one to reference speakers
+by maximum agreement on scored words; a nil or unmapped word counts as wrong.
+Accuracy is reported by reference turn length, because one-word turns are the
+replies that smoothing can erase (#1046). Spurious switches count consecutive
+scored words of one reference turn that received different predicted speakers.
+
+This is not DER or cpWER. No audio, inference, downloads, or third-party Python
+packages are needed.
 """
 from __future__ import annotations
 
@@ -20,20 +26,55 @@ import argparse
 import bisect
 import collections
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 POLICIES = ("raw", "app", "keep")
 BUCKETS = ("1", "2", "3-5", "6+", "all")
 
 
-def read_rttm(path: Path) -> list[tuple[int, int, str]]:
+@dataclass(frozen=True)
+class Turn:
+    start: int
+    end: int
+    speaker: str
+
+
+@dataclass(frozen=True)
+class Label:
+    """A scored word: its reference speaker, turn index and turn length in ASR words."""
+    speaker: str
+    turn: int
+    turn_words: int
+
+
+def read_rttm(path: Path) -> list[Turn]:
     turns = []
     for line in path.read_text().splitlines():
         fields = line.split()
         if fields and fields[0] == "SPEAKER":
             start = round(float(fields[3]) * 1000)
-            turns.append((start, start + round(float(fields[4]) * 1000), fields[7]))
-    return sorted(turns)
+            turns.append(Turn(start, start + round(float(fields[4]) * 1000), fields[7]))
+    return merge_turns(turns)
+
+
+def merge_turns(turns: list[Turn]) -> list[Turn]:
+    """Merges touching or overlapping intervals of the same speaker."""
+    by_speaker = collections.defaultdict(list)
+    for turn in turns:
+        by_speaker[turn.speaker].append(turn)
+    merged = []
+    for speaker, own in by_speaker.items():
+        own.sort(key=lambda t: t.start)
+        current = own[0]
+        for turn in own[1:]:
+            if turn.start <= current.end:
+                current = Turn(current.start, max(current.end, turn.end), speaker)
+            else:
+                merged.append(current)
+                current = turn
+        merged.append(current)
+    return sorted(merged, key=lambda t: (t.start, t.speaker))
 
 
 def read_uem(path: Path) -> list[tuple[int, int]]:
@@ -45,24 +86,36 @@ def read_uem(path: Path) -> list[tuple[int, int]]:
     return regions
 
 
-def label_words(words: list[dict], turns: list[tuple[int, int, str]], uem: list[tuple[int, int]]) -> list[str | None]:
-    """Reference speaker of each word, or None when it is not scorable."""
-    starts = [turn[0] for turn in turns]
-    longest = max((end - start for start, end, _ in turns), default=0)
-    labels = []
+def label_words(words: list[dict], turns: list[Turn], uem: list[tuple[int, int]]) -> list[Label | None]:
+    """Reference label of each word, or None when it is not scored."""
+    starts = [turn.start for turn in turns]
+    longest = max((turn.end - turn.start for turn in turns), default=0)
+
+    def nearby(start: float, end: float) -> range:
+        return range(bisect.bisect_left(starts, start - longest), bisect.bisect_right(starts, end))
+
+    holder = []
     for word in words:
+        mid = (word["startMs"] + word["endMs"]) / 2
+        holder.append(next((i for i in nearby(mid, mid) if turns[i].start <= mid < turns[i].end), None))
+    turn_words = collections.Counter(index for index in holder if index is not None)
+
+    labels = []
+    for word, index in zip(words, holder, strict=True):
         start, end = word["startMs"], word["endMs"]
         inside = any(lo <= start and end <= hi for lo, hi in uem)
-        first = bisect.bisect_left(starts, start - longest)
-        last = bisect.bisect_left(starts, end)
-        speakers = {spk for s, e, spk in turns[first:last] if s < end and start < e}
-        covering = {spk for s, e, spk in turns[first:last] if s <= start and end <= e}
-        labels.append(next(iter(covering)) if inside and len(speakers) == 1 and covering else None)
+        speakers = {turns[i].speaker for i in nearby(start, end) if turns[i].start < end and start < turns[i].end}
+        if inside and index is not None and speakers == {turns[index].speaker}:
+            labels.append(Label(turns[index].speaker, index, turn_words[index]))
+        else:
+            labels.append(None)
     return labels
 
 
 def merge(words: list[dict], segments: list[dict], policy: str) -> list[str | None]:
     """Mirror of SpeakerMerger.mergeWordTimestampsWithSpeakers."""
+    if not words or not segments:
+        return [word.get("speakerId") for word in words]
     ordered = sorted(segments, key=lambda s: s["startMs"])
     assigned, index = [], 0
     for word in words:
@@ -74,7 +127,7 @@ def merge(words: list[dict], segments: list[dict], policy: str) -> list[str | No
             if overlap > best_overlap:
                 best, best_overlap = ordered[cursor]["speakerId"], overlap
             cursor += 1
-        assigned.append(best if best_overlap > 0 else None)
+        assigned.append(best if best_overlap > 0 else word.get("speakerId"))
     if policy == "raw" or len(assigned) < 3:
         return assigned
     smoothed, start = list(assigned), 0
@@ -92,37 +145,70 @@ def merge(words: list[dict], segments: list[dict], policy: str) -> list[str | No
     return smoothed
 
 
+def best_mapping(agreement: dict[tuple[str, str], int]) -> dict[str, str]:
+    """One-to-one predicted -> reference mapping that maximizes total agreement (Hungarian)."""
+    predicted = sorted({pred for pred, _ in agreement})
+    reference = sorted({ref for _, ref in agreement})
+    size = max(len(predicted), len(reference))
+    if size == 0:
+        return {}
+    top = max(agreement.values())
+    cost = [[top - agreement.get((predicted[r], reference[c]), 0)
+             if r < len(predicted) and c < len(reference) else top
+             for c in range(size)] for r in range(size)]
+    u, v, match, way = [0] * (size + 1), [0] * (size + 1), [0] * (size + 1), [0] * (size + 1)
+    for row in range(1, size + 1):
+        match[0], column = row, 0
+        least, used = [float("inf")] * (size + 1), [False] * (size + 1)
+        while True:
+            used[column] = True
+            current, delta, nxt = match[column], float("inf"), 0
+            for c in range(1, size + 1):
+                if not used[c]:
+                    reduced = cost[current - 1][c - 1] - u[current] - v[c]
+                    if reduced < least[c]:
+                        least[c], way[c] = reduced, column
+                    if least[c] < delta:
+                        delta, nxt = least[c], c
+            for c in range(size + 1):
+                if used[c]:
+                    u[match[c]] += delta
+                    v[c] -= delta
+                else:
+                    least[c] -= delta
+            column = nxt
+            if match[column] == 0:
+                break
+        while column:
+            previous = way[column]
+            match[column], column = match[previous], previous
+    return {
+        predicted[match[c] - 1]: reference[c - 1]
+        for c in range(1, size + 1)
+        if match[c] - 1 < len(predicted) and c - 1 < len(reference)
+        and agreement.get((predicted[match[c] - 1], reference[c - 1]), 0) > 0
+    }
+
+
 def bucket(length: int) -> str:
     return "1" if length == 1 else "2" if length == 2 else "3-5" if length <= 5 else "6+"
 
 
-def score(labels: list[str | None], predicted: list[str | None]) -> dict:
-    pairs = [(ref, pred) for ref, pred in zip(labels, predicted) if ref is not None]
-    agreement = collections.Counter((pred, ref) for ref, pred in pairs if pred is not None)
-    mapping, used = {}, set()
-    for (pred, ref), _ in sorted(agreement.items(), key=lambda item: (-item[1], item[0])):
-        if pred not in mapping and ref not in used:
-            mapping[pred] = ref
-            used.add(ref)
+def score(labels: list[Label | None], predicted: list[str | None]) -> dict:
+    scored = [(i, label, pred) for i, (label, pred) in enumerate(zip(labels, predicted, strict=True)) if label]
+    agreement = collections.Counter((pred, label.speaker) for _, label, pred in scored if pred is not None)
+    mapping = best_mapping(agreement)
     totals, correct = collections.Counter(), collections.Counter()
-    start = 0
-    while start < len(pairs):
-        end = start + 1
-        while end < len(pairs) and pairs[end][0] == pairs[start][0]:
-            end += 1
-        for ref, pred in pairs[start:end]:
-            for name in (bucket(end - start), "all"):
-                totals[name] += 1
-                correct[name] += mapping.get(pred) == ref
-        start = end
+    for _, label, pred in scored:
+        hit = mapping.get(pred) == label.speaker
+        for name in (bucket(label.turn_words), "all"):
+            totals[name] += 1
+            correct[name] += hit
     spurious = sum(
-        1 for (ref_a, pred_a), (ref_b, pred_b) in zip(pairs, pairs[1:])
-        if ref_a == ref_b and pred_a is not None and pred_b is not None and pred_a != pred_b
+        1 for (i, a, pa), (j, b, pb) in zip(scored, scored[1:])
+        if j == i + 1 and a.turn == b.turn and pa is not None and pb is not None and pa != pb
     )
-    return {
-        "words": totals, "correct": correct,
-        "nil": sum(pred is None for _, pred in pairs), "spurious": spurious,
-    }
+    return {"words": totals, "correct": correct, "nil": sum(pred is None for _, _, pred in scored), "spurious": spurious}
 
 
 def main() -> int:
@@ -136,6 +222,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     records = [r for r in json.loads(args.manifest.read_text())["recordings"] if r["condition"] == args.condition]
+    if not records:
+        parser.error(f"no {args.condition} recordings in {args.manifest}")
     report = {}
     print(f"{'backend':24} {'policy':6} " + " ".join(f"{name:>7}" for name in BUCKETS) + f" {'nil%':>6} {'spur/1k':>8}")
     for value in args.predictions:
@@ -143,9 +231,10 @@ def main() -> int:
         sums = {policy: collections.Counter() for policy in POLICIES}
         for record in records:
             rid = record["id"]
-            words = sorted(json.loads((args.asr_root / f"{rid}.json").read_text())["wordTimestamps"],
-                           key=lambda w: w["startMs"])
-            words = [w for w in words if w["endMs"] > w["startMs"]]
+            words = sorted(
+                (w for w in json.loads((args.asr_root / f"{rid}.json").read_text())["wordTimestamps"]
+                 if w["endMs"] > w["startMs"]),
+                key=lambda w: w["startMs"])
             labels = label_words(words, read_rttm(args.reference_root / f"{rid}.rttm"),
                                  read_uem(args.reference_root / f"{rid}.uem"))
             segments = json.loads((Path(directory) / f"{rid}.json").read_text())["segments"]
@@ -158,8 +247,13 @@ def main() -> int:
         for policy in POLICIES:
             total = sums[policy]
             words = total["words:all"]
+            if not words:
+                report[name][policy] = {"scoredWords": 0}
+                print(f"{name:24} {policy:6} no scored words")
+                continue
             accuracy = {b: 100 * total[f"correct:{b}"] / total[f"words:{b}"] for b in BUCKETS if total[f"words:{b}"]}
             report[name][policy] = {
+                "scoredWords": words,
                 "accuracyPercentByReferenceTurnWords": accuracy,
                 "wordsByReferenceTurnWords": {b: total[f"words:{b}"] for b in BUCKETS},
                 "nilPercent": 100 * total["nil"] / words,

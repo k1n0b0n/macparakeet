@@ -117,10 +117,12 @@ python3 benchmarks/diarization/scripts/score_word_attribution.py \
   --predictions nemotron=/path/to/results/nemotron
 ```
 
-It scores each word against the reference speaker active over its whole span,
-under the merger's `raw`, `app` (as shipped) and `keep` (gaps filled, one-word
-turns kept) policies, by the length of the reference turn the word belongs to.
-Overlapped words and ASR errors are excluded; it is not cpWER.
+Reference turns are RTTM intervals with touching intervals of one speaker
+merged; each word belongs to the turn holding its midpoint. Words touching two
+speakers, no reference speech or the outside of the UEM are skipped. Word text
+is not compared with the reference, so ASR errors stay in; it is not cpWER. The
+merger runs under `raw`, `app` (as shipped) and `keep` (gaps filled, one-word
+turns kept) policies, and accuracy is reported by reference turn length.
 
 The opt-in `NemotronDiarizationE2ETests` exercises real ASR, source-separated
 meeting finalization, persistence, file transcription and model reuse. See its
