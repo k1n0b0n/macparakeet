@@ -118,11 +118,12 @@ python3 benchmarks/diarization/scripts/score_word_attribution.py \
 ```
 
 Reference turns are RTTM intervals with touching or overlapping intervals of
-one speaker merged; each word belongs to the turn holding its midpoint. Words
-touching two speakers, no reference speech or the outside of the UEM are
-skipped. One speaker mapping per recording, from the unsmoothed assignment,
-scores every policy. Word text
-is not compared with the reference, so ASR errors stay in; it is not cpWER. The
+one speaker merged; each word belongs to the turn holding its midpoint. A word
+may extend past its turn into reference silence, since ASR word timings rarely
+match reference turn edges; words touching two speakers, with no midpoint in a
+turn, or outside the UEM are skipped. One speaker mapping per recording, from
+the unsmoothed assignment, scores every policy. Word text is not compared with
+the reference, so ASR errors stay in; it is not cpWER. The
 merger runs under `raw`, `app` (as shipped) and `keep` (gaps filled, one-word
 turns kept) policies, and accuracy is reported by reference turn length.
 
