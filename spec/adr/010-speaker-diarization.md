@@ -77,8 +77,8 @@ Three implementation boundaries remain material:
 
 - The word merger fills unknown gaps between two runs of the same speaker.
   Since 2026-10-05 it no longer merges a one-word turn into the surrounding
-  speaker. The final-word evaluation
-  (`benchmarks/diarization/scripts/score_word_attribution.py`, 16 AMI
+  speaker. The final-word evaluation (the word attribution scorer added in
+  [#1217](https://github.com/moona3k/macparakeet/pull/1217), 16 AMI
   mixed-headset test meetings, app Parakeet words) showed that merge got 8 of
   the 81 Nemotron words it changed right, against 73 when kept, and 14 against
   39 of 67 for Community-1. Accuracy on one-word turns rises from 76% to 93%
