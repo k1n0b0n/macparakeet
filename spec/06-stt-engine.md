@@ -682,7 +682,7 @@ smoothed at word assignment (`SpeakerMerger`) only when both neighboring runs
 agree ([issue #1046](https://github.com/moona3k/macparakeet/issues/1046)). This
 does not change diarizer output, and it can erase a brief reply.
 
-The app pins FluidAudio 0.17.4. Older Community-1 measurements under 0.15.x are not current app accuracy or throughput guarantees. Asset sizes above also do not measure peak process memory. See ADR-010's 2026-09-25 Nemotron amendment and its earlier amendments for provenance and the remaining DER gap.
+The app pins FluidAudio 0.17.7 (ADR-010 2026-10-08 amendment). Older Community-1 measurements under 0.15.x are not current app accuracy or throughput guarantees. Asset sizes above also do not measure peak process memory. See ADR-010's 2026-09-25 Nemotron amendment and its earlier amendments for provenance and the remaining DER gap.
 
 ### What's NOT included
 

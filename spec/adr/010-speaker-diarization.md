@@ -2,7 +2,7 @@
 
 > Status: **Accepted**
 > Date: 2026-03-04
-> Current scope (2026-09-25): post-ASR file/URL transcription and isolated system-track meeting refinement. The Nemotron amendment below governs the default and FluidAudio 0.17.4 pin. Earlier model comparisons, throughput claims and Community-1-only decisions remain historical context. This development decision does not describe the stable DMG.
+> Current scope (2026-09-25): post-ASR file/URL transcription and isolated system-track meeting refinement. The Nemotron amendment below governs the default; the 2026-10-08 amendment governs the FluidAudio 0.17.7 pin. Earlier model comparisons, throughput claims and Community-1-only decisions remain historical context. This development decision does not describe the stable DMG.
 
 ## Nemotron default decision (2026-09-25)
 
@@ -90,6 +90,38 @@ Three implementation boundaries remain material:
   They are therefore not a uniform acoustic-activity timeline. The separate
   [audio speaker timeline contract](../contracts/audio-speaker-timeline-v1.md)
   remains the intended boundary for preserving that evidence.
+
+## FluidAudio 0.17.7 (2026-10-08)
+
+Pin FluidAudio 0.17.7. Over 0.17.4 it adds two Community-1 fixes from
+[#1046](https://github.com/moona3k/macparakeet/issues/1046):
+[FluidAudio #988](https://github.com/FluidInference/FluidAudio/pull/988) takes
+the FBank mean over frames that hold signal, so windows of digital silence (a
+muted call track, the padded last window of a file) no longer lose the voice
+and gather into extra clusters; [FluidAudio
+#982](https://github.com/FluidInference/FluidAudio/pull/982) re-embeds
+zero-vote runs from the span repeated across the window instead of zero
+padding. The other changes since 0.17.4 add the Phonon-2 ASR model (not
+offered by the app; `AppPaths` only maps its cache folder), make custom
+vocabulary alignment iterative (#962), add a LocalVQE echo-suppression beta
+the app does not use (its own LocalVQE runtime is separate), adopt unmarked
+model caches for pinned revisions (#977; it may remove the one connected setup
+described above for unmarked caches, not verified here), and change TTS.
+
+Matched app-bench runs on the 16 AMI mixed-headset test meetings, NIST-scored
+as in the Nemotron evaluation, original audio and audio with non-speech set to
+exact zero (gated):
+
+| Backend / audio | 0.17.4 DER, confusion, exact count | 0.17.7 DER, confusion, exact count |
+| --- | ---: | ---: |
+| Community-1 / original | 23.19%, 3.47%, 12/16 | 22.97%, 3.25%, 14/16 |
+| Community-1 / gated | 24.82%, 5.62%, 1/16 | 22.42%, 3.22%, 14/16 |
+| Nemotron fast128 / original | 26.03%, 0.72%, 15/16 | identical |
+| Nemotron fast128 / gated | 25.76%, 0.76%, 14/16 | identical |
+
+Misses and false alarms are unchanged in every arm. The Community-1 aggregation
+revision becomes `fluidaudio-0.17.7`, so experimental voice profiles enrolled
+under 0.17.4 stop matching new runs (speaker-voiceprints contract).
 
 ## Context (original decision)
 
