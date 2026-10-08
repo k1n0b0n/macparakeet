@@ -214,7 +214,7 @@ small user vocabularies rather than full dictionaries.
 | Capability | Model | Details |
 |-----------|-------|---------|
 | Streaming ASR | Parakeet EOU 1.1B | Real-time with end-of-utterance detection, 160ms-1600ms chunks |
-| Speaker diarization (automatic, after ASR) | Nemotron 3, `fast128`, through FluidAudio 0.17.4 | ~199 MB pinned assets; eight-speaker limit per source; overlapping activity retained. See ADR-010 and the matched evaluation in `benchmarks/diarization/2026-09-25-nemotron-evaluation.md`. |
+| Speaker diarization (automatic, after ASR) | Nemotron 3, `fast128`, through FluidAudio 0.17.7 | ~199 MB pinned assets; eight-speaker limit per source; overlapping activity retained. See ADR-010 and the matched evaluation in `benchmarks/diarization/2026-09-25-nemotron-evaluation.md`. |
 | Speaker diarization (explicit count / experimental voice profiles) | Pyannote community-1 + WeSpeaker v2 + VBx clustering | Existing high-accuracy configuration and speaker-count constraints; no fixed eight-speaker cap. Also handles a calendar bound violated by Nemotron. |
 | Speaker diarization (streaming) | Sortformer (NVIDIA) | ~32% DER, 4 speaker max. Not used — see ADR-010 for rationale. |
 | Voice activity detection | Silero | 96% accuracy, 1220x RTF |

@@ -6,7 +6,8 @@
 
 ## Nemotron default decision (2026-09-25)
 
-Use **Nemotron 3 `fast128` through FluidAudio 0.17.4** for automatic speaker
+Use **Nemotron 3 `fast128` through FluidAudio 0.17.4** (pinned to 0.17.7 by the
+2026-10-08 amendment, with identical Nemotron results) for automatic speaker
 detection after recording. Keep the existing Community-1/WeSpeaker/VBx service
 for explicit Exact/Range choices and experimental voice-profile builds, whose
 identity embeddings Nemotron does not provide. The shared factory supplies the
@@ -104,9 +105,10 @@ zero-vote runs from the span repeated across the window instead of zero
 padding. The other changes since 0.17.4 add the Phonon-2 ASR model (not
 offered by the app; `AppPaths` only maps its cache folder), make custom
 vocabulary alignment iterative (#962), add a LocalVQE echo-suppression beta
-the app does not use (its own LocalVQE runtime is separate), adopt unmarked
-model caches for pinned revisions (#977; it may remove the one connected setup
-described above for unmarked caches, not verified here), and change TTS.
+the app does not use (its own LocalVQE runtime is separate), adopt matching
+unmarked model caches during connected preparation (#977; the app still reports
+an unmarked cache as not ready, so the one connected setup described above still
+applies), and change TTS.
 
 Matched app-bench runs on the 16 AMI mixed-headset test meetings, NIST-scored
 as in the Nemotron evaluation, original audio and audio with non-speech set to
@@ -120,8 +122,9 @@ exact zero (gated):
 | Nemotron fast128 / gated | 25.76%, 0.76%, 14/16 | identical |
 
 Misses and false alarms are unchanged in every arm. The Community-1 aggregation
-revision becomes `fluidaudio-0.17.7`, so experimental voice profiles enrolled
-under 0.17.4 stop matching new runs (speaker-voiceprints contract).
+revision becomes `fluidaudio-0.17.7`: experimental voice profiles enrolled under
+0.17.4 stay comparable with new runs under the stricter cross-aggregation
+threshold (speaker-voiceprints contract).
 
 ## Context (original decision)
 
