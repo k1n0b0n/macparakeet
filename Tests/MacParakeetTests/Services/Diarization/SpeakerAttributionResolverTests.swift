@@ -129,6 +129,30 @@ final class SpeakerAttributionResolverTests: XCTestCase {
         }
     }
 
+    func testRenameRejectsUnattributedSystemEntryButNotUndiarizedOthers() {
+        func renameSystem(speakers: [SpeakerInfo]) -> [UnresolvedSpeakerCorrectionReason] {
+            var transcription = fixture()
+            transcription.speakers = speakers
+            let fingerprint = SpeakerAttributionResolver.fingerprint(for: transcription)
+            let rename = correction(
+                id: UUID(), parentID: nil, sequence: 1,
+                fingerprint: fingerprint, transcription: transcription,
+                command: .rename(speakerID: "system", label: "Sam")
+            )
+            return resolve(transcription, correction: rename, fingerprint: fingerprint)
+                .unresolvedCorrections.map(\.reason)
+        }
+
+        XCTAssertEqual(
+            renameSystem(speakers: [
+                SpeakerInfo(id: "system:S1", label: "Others 1"),
+                SpeakerInfo(id: "system", label: "Unattributed"),
+            ]),
+            [.protectedSpeaker]
+        )
+        XCTAssertEqual(renameSystem(speakers: [SpeakerInfo(id: "system", label: "Others")]), [])
+    }
+
     func testReviseTextRejectsAnEmptySessionBlankReplacementAndDuplicatePassage() {
         let transcription = twoSegmentFixture()
         let baseline = SpeakerAttributionResolver.resolve(transcription: transcription)

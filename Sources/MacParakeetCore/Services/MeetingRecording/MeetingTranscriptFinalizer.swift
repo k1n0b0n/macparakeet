@@ -67,10 +67,21 @@ struct MeetingTranscriptFinalizer {
         let microphoneWords = sourceReconciliation.microphoneWords
         let finalizedSystemWords: [WordTimestamp]
         if let systemDiarization {
+            // Words go in unassigned so the merger fills a gap between two runs
+            // of one speaker; what stays unassigned returns to the source id.
+            let systemID = AudioSource.system.rawValue
             finalizedSystemWords = SpeakerMerger.mergeWordTimestampsWithSpeakers(
-                words: systemWords,
+                words: systemWords.map { word in
+                    var word = word
+                    word.speakerId = nil
+                    return word
+                },
                 segments: systemDiarization.segments
-            )
+            ).map { word in
+                var word = word
+                word.speakerId = word.speakerId ?? systemID
+                return word
+            }
         } else {
             finalizedSystemWords = systemWords
         }
@@ -128,14 +139,19 @@ struct MeetingTranscriptFinalizer {
             speakers.append(SpeakerInfo(id: AudioSource.microphone.rawValue, label: AudioSource.microphone.displayLabel))
         }
 
-        if activeIDs.contains(AudioSource.system.rawValue) {
-            speakers.append(SpeakerInfo(id: AudioSource.system.rawValue, label: AudioSource.system.displayLabel))
+        guard let systemDiarization else {
+            if activeIDs.contains(AudioSource.system.rawValue) {
+                speakers.append(SpeakerInfo(id: AudioSource.system.rawValue, label: AudioSource.system.displayLabel))
+            }
+            return speakers
         }
 
-        if let systemDiarization {
-            for speaker in systemDiarization.speakers where activeIDs.contains(speaker.id) {
-                speakers.append(speaker)
-            }
+        for speaker in systemDiarization.speakers where activeIDs.contains(speaker.id) {
+            speakers.append(speaker)
+        }
+        // Words that overlap no diarized speaker, listed after the people.
+        if activeIDs.contains(AudioSource.system.rawValue) {
+            speakers.append(SpeakerInfo(id: AudioSource.system.rawValue, label: SpeakerInfo.unattributedSystemLabel))
         }
 
         return speakers

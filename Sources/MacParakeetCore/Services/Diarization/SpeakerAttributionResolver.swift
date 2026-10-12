@@ -290,6 +290,10 @@ public enum SpeakerAttributionResolver {
                 reject(.missingSpeaker)
                 return
             }
+            guard !replay.speakers.isUnattributedSystemEntry(speakerID) else {
+                reject(.protectedSpeaker)
+                return
+            }
             let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 reject(.invalidSpeaker)

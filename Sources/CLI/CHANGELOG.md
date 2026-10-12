@@ -103,6 +103,12 @@ by checking exit code first: `2` = misuse, `1` = runtime, `0` = success.
   `--speaker-max` runs (Community-1) no longer over-split audio that contains
   digital silence, such as a muted call track. Automatic speaker detection
   (Nemotron), ASR, JSON fields and exit codes are unchanged.
+- Diarized meetings: system-track words that overlap no detected speaker take
+  their neighbors' speaker when both agree; the rest stay under the `system`
+  speaker id, now labelled `Unattributed` and listed after the people. A
+  meeting's `speakerCount` no longer counts that entry, and renaming it is
+  rejected like other protected capture-channel speakers. Meetings transcribed
+  before this change keep their stored values until re-transcribed.
 - Newly seeded built-in Summary prompts include meeting notes by default,
   including when run through `prompts run`. Existing preferences, custom prompt
   defaults, and saved result snapshots are preserved. Disable notes with

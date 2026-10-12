@@ -71,7 +71,11 @@ fixed-ASR diagnostic, Nemotron's 491 eligible word midpoints agreed with the
 reference speaker 487 times before smoothing and 486 afterwards. This is a
 narrow diagnostic excluding overlap and ASR errors, not cpWER. The meeting
 also retained a source-only `Others` word alongside two detected remote
-identities; today's roster count includes that fallback bucket as an entry.
+identities; the roster count then included that fallback bucket as an entry.
+Since 2026-10-12 a diarized meeting fills such a word from its neighbors when
+both are the same speaker, lists the rest as `Unattributed` after the people,
+leaves that entry out of the speaker count and refuses to rename it
+([#1228](https://github.com/moona3k/macparakeet/issues/1228)).
 Neither result supports presenting roster size as a verified number of people.
 
 Three implementation boundaries remain material:

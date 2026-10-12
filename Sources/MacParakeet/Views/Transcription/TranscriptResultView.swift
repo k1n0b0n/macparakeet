@@ -1635,7 +1635,7 @@ struct TranscriptResultView: View {
     }
 
     private var speakerCountValue: Int {
-        activeTranscription.speakers?.count ?? activeTranscription.speakerCount ?? 0
+        activeTranscription.speakers?.people.count ?? activeTranscription.speakerCount ?? 0
     }
 
     /// Meeting retranscription configures the diarized participants captured
@@ -1643,7 +1643,7 @@ struct TranscriptResultView: View {
     private var defaultRetranscriptionSpeakerCount: Int {
         guard activeTranscription.sourceType == .meeting else { return speakerCountValue }
         if let speakers = activeTranscription.speakers, !speakers.isEmpty {
-            return speakers.filter { $0.id != AudioSource.microphone.rawValue }.count
+            return speakers.people.filter { $0.id != AudioSource.microphone.rawValue }.count
         }
         return max(0, speakerCountValue - 1)
     }
@@ -5326,13 +5326,15 @@ struct TranscriptResultView: View {
                         Spacer()
 
                         Menu {
-                            Button("Rename…") {
-                                beginSpeakerRename(
-                                    speaker,
-                                    contextID: SpeakerRenameAccessibility.overviewRenameContextIdentifier(
-                                        for: speaker.id
+                            if canRenameSpeaker(speaker) {
+                                Button("Rename…") {
+                                    beginSpeakerRename(
+                                        speaker,
+                                        contextID: SpeakerRenameAccessibility.overviewRenameContextIdentifier(
+                                            for: speaker.id
+                                        )
                                     )
-                                )
+                                }
                             }
 
                             // Sits beside the other whole-speaker actions because
@@ -5463,6 +5465,10 @@ struct TranscriptResultView: View {
             .accessibilityLabel(SpeakerRenameAccessibility.speakerNameFieldLabel)
             .accessibilityHint(SpeakerRenameAccessibility.speakerNameFieldHint)
             .accessibilityIdentifier(SpeakerRenameAccessibility.speakerNameFieldIdentifier(contextID: contextID))
+        } else if !canRenameSpeaker(speaker) {
+            Text(speaker.label)
+                .font(font)
+                .foregroundStyle(color)
         } else {
             HStack(spacing: 6) {
                 Text(speaker.label)
@@ -5492,7 +5498,12 @@ struct TranscriptResultView: View {
         }
     }
 
+    private func canRenameSpeaker(_ speaker: SpeakerInfo) -> Bool {
+        !(activeTranscription.speakers ?? []).isUnattributedSystemEntry(speaker.id)
+    }
+
     private func beginSpeakerRename(_ speaker: SpeakerInfo, contextID: String) {
+        guard canRenameSpeaker(speaker) else { return }
         if let previous = speakerRename.begin(speaker, contextID: contextID, savePrevious: saveSpeakerRename) {
             if focusedSpeakerRenameContext == previous.contextID {
                 focusedSpeakerRenameContext = nil

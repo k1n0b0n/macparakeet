@@ -318,6 +318,25 @@ public struct SpeakerInfo: Codable, Sendable, Equatable {
         }
         return false
     }
+
+    /// Label of the plain system-track entry once that track is diarized: it
+    /// then holds only the words that overlap no diarized speaker (#1228).
+    public static let unattributedSystemLabel = "Unattributed"
+}
+
+extension Array where Element == SpeakerInfo {
+    /// Whether `id` is the plain `system` entry of a meeting whose system track
+    /// is diarized. It then only holds words that overlap no diarized speaker:
+    /// it is not a person, so it is not counted and cannot be renamed (#1228).
+    public func isUnattributedSystemEntry(_ id: String) -> Bool {
+        let systemID = AudioSource.system.rawValue
+        return id == systemID && contains { $0.id.hasPrefix("\(systemID):") }
+    }
+
+    /// The speakers that stand for people.
+    public var people: [SpeakerInfo] {
+        filter { !isUnattributedSystemEntry($0.id) }
+    }
 }
 
 public struct DiarizationSegmentRecord: Codable, Sendable, Equatable {
