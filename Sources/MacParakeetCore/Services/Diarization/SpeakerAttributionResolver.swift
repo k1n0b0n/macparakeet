@@ -295,7 +295,11 @@ public enum SpeakerAttributionResolver {
                 return
             }
             let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
+            // The label marks the protected entry, so an undiarized `Others`
+            // entry must not take it.
+            guard !trimmed.isEmpty,
+                speakerID != AudioSource.system.rawValue || trimmed != SpeakerInfo.unattributedSystemLabel
+            else {
                 reject(.invalidSpeaker)
                 return
             }

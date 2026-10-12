@@ -130,14 +130,14 @@ final class SpeakerAttributionResolverTests: XCTestCase {
     }
 
     func testRenameRejectsUnattributedSystemEntryButNotUndiarizedOthers() {
-        func renameSystem(speakers: [SpeakerInfo]) -> [UnresolvedSpeakerCorrectionReason] {
+        func renameSystem(speakers: [SpeakerInfo], to label: String = "Sam") -> [UnresolvedSpeakerCorrectionReason] {
             var transcription = fixture()
             transcription.speakers = speakers
             let fingerprint = SpeakerAttributionResolver.fingerprint(for: transcription)
             let rename = correction(
                 id: UUID(), parentID: nil, sequence: 1,
                 fingerprint: fingerprint, transcription: transcription,
-                command: .rename(speakerID: "system", label: "Sam")
+                command: .rename(speakerID: "system", label: label)
             )
             return resolve(transcription, correction: rename, fingerprint: fingerprint)
                 .unresolvedCorrections.map(\.reason)
@@ -159,6 +159,11 @@ final class SpeakerAttributionResolverTests: XCTestCase {
             [.protectedSpeaker]
         )
         XCTAssertEqual(renameSystem(speakers: [SpeakerInfo(id: "system", label: "Others")]), [])
+        // The label marks the protected entry, so an undiarized entry cannot take it.
+        XCTAssertEqual(
+            renameSystem(speakers: [SpeakerInfo(id: "system", label: "Others")], to: " Unattributed "),
+            [.invalidSpeaker]
+        )
     }
 
     func testReviseTextRejectsAnEmptySessionBlankReplacementAndDuplicatePassage() {
