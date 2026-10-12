@@ -150,6 +150,14 @@ final class SpeakerAttributionResolverTests: XCTestCase {
             ]),
             [.protectedSpeaker]
         )
+        // Every diarized speaker merged into an added one: the entry keeps its status.
+        XCTAssertEqual(
+            renameSystem(speakers: [
+                SpeakerInfo(id: "user:\(UUID().uuidString)", label: "Sam"),
+                SpeakerInfo(id: "system", label: "Unattributed"),
+            ]),
+            [.protectedSpeaker]
+        )
         XCTAssertEqual(renameSystem(speakers: [SpeakerInfo(id: "system", label: "Others")]), [])
     }
 

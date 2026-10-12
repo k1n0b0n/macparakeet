@@ -328,9 +328,17 @@ extension Array where Element == SpeakerInfo {
     /// Whether `id` is the plain `system` entry of a meeting whose system track
     /// is diarized. It then only holds words that overlap no diarized speaker:
     /// it is not a person, so it is not counted and cannot be renamed (#1228).
+    ///
+    /// Only the finalizer of a diarized meeting sets the `Unattributed` label,
+    /// and the entry cannot be renamed, so the label survives corrections that
+    /// remove every diarized speaker. Meetings finalized before #1228 kept the
+    /// `Others` label there; for them the diarized ids are the only signal.
     public func isUnattributedSystemEntry(_ id: String) -> Bool {
         let systemID = AudioSource.system.rawValue
-        return id == systemID && contains { $0.id.hasPrefix("\(systemID):") }
+        guard id == systemID, let entry = first(where: { $0.id == systemID }) else { return false }
+        if entry.label == SpeakerInfo.unattributedSystemLabel { return true }
+        return entry.label == AudioSource.system.displayLabel
+            && contains { $0.id.hasPrefix("\(systemID):") }
     }
 
     /// The speakers that stand for people.

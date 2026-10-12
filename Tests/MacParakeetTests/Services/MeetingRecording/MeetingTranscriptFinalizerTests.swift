@@ -44,6 +44,16 @@ final class MeetingTranscriptFinalizerTests: XCTestCase {
         XCTAssertEqual(finalized.speakers.people.count, 1)
     }
 
+    func testDiarizedTrackWithNoCoveredWordCountsNobody() {
+        let finalized = finalizeSystem(
+            words: [("hello", 0, 100)],
+            segments: [SpeakerSegment(speakerId: "system:S1", startMs: 500, endMs: 900)]
+        )
+
+        XCTAssertEqual(finalized.speakers, [SpeakerInfo(id: "system", label: "Unattributed")])
+        XCTAssertEqual(finalized.speakers.people, [])
+    }
+
     func testPeopleDropsLegacyOthersEntryOfDiarizedMeeting() {
         let speakers = [
             SpeakerInfo(id: "microphone", label: "Me"),
