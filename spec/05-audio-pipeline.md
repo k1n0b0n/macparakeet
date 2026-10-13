@@ -340,8 +340,9 @@ render is predicted to exceed the bounded final-STT deadline.
 
 Decoded PCM is spooled sequentially to private, immediately unlinked temporary
 files. The echo probe reads bounded windows; conditioning and AAC encoding pull
-bounded chunks instead of retaining whole recordings in RAM. Sample alignment,
-probe thresholds, conditioner cadence and output duration are unchanged. Temporary
+bounded chunks instead of retaining whole recordings in RAM. Spooling does not
+change sample alignment (including the reference lookahead above), probe
+thresholds, conditioner cadence or output duration. Temporary
 storage is roughly 220 MiB per hour per source at 16 kHz mono Float32; descriptors
 release it on completion, cancellation, failure or process exit. Scratch I/O
 failure follows the existing observable raw-microphone fallback.
