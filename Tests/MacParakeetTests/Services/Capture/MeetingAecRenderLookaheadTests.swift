@@ -81,7 +81,8 @@ final class MeetingAecRenderLookaheadTests: XCTestCase {
                 libraryURL: libraryURL,
                 modelURL: modelURL,
                 sampleRate: MeetingCleanedMicRenderer.renderSampleRate))
-        try XCTSkipUnless(conditioner.diagnostics.loaded, "LocalVQE conditioner did not load.")
-        return conditioner
+        // The assets were opted in and exist, so a load failure is a regression.
+        return try XCTUnwrap(
+            conditioner.diagnostics.loaded ? conditioner : nil, "LocalVQE conditioner did not load.")
     }
 }
